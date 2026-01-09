@@ -1,0 +1,121 @@
+# SilverStripe Database Migrations
+
+Database migration utilities for SilverStripe 5. Handles table renames, classname value remapping, and column renames during `dev/build`.
+
+## Installation
+
+```bash
+composer require restruct/silverstripe-database-migrations
+```
+
+## Features
+
+- **ClassName Remapping**: Reads `$legacy_classnames` from DataObjects and injects into `DatabaseAdmin.classname_value_remapping`
+- **Table Renames**: Reads `$legacy_table_names` from DataObjects and renames tables before schema updates
+- **Column Renames**: Rename columns via config (useful for fixing name collisions)
+- **Conflict Handling**: Automatically handles cases where both old and new tables exist
+
+## Usage
+
+### DataObject Migrations
+
+Add legacy mappings directly to your DataObjects:
+
+```php
+class MyModel extends DataObject
+{
+    private static $table_name = 'MyModel';
+
+    // Old class names that should map to this class
+    private static $legacy_classnames = [
+        'Old\Namespace\MyModel',
+        'Another\Old\MyModel',
+    ];
+
+    // Old table names that should be renamed to this class's table
+    private static $legacy_table_names = [
+        'OldTableName',
+    ];
+}
+```
+
+### Config-based Migrations
+
+For join tables, versioned tables, or other non-DataObject tables:
+
+```yaml
+Restruct\SilverStripe\Migrations\DatabaseMigrationExtension:
+  # Table renames
+  table_mappings:
+    OldJoinTable: NewJoinTable
+    OldModel_Versions: NewModel_Versions
+
+  # Classname remappings (see explanation below)
+  classname_mappings:
+    'Old\Namespace\SomeClass': 'New\Namespace\SomeClass'
+
+  # Column renames: [table => [old_column => new_column]]
+  column_renames:
+    MyTable:
+      old_column_name: new_column_name
+```
+
+### Running Migrations
+
+```bash
+vendor/bin/sake dev/build flush=1
+```
+
+Migrations run automatically before SilverStripe processes any schema updates.
+
+## How ClassName Remapping Works
+
+SilverStripe stores the fully-qualified class name in a `ClassName` column for polymorphic queries. When you rename or move a class, existing database records still reference the old class name:
+
+```
+| ID | ClassName                  | Title    |
+|----|----------------------------|----------|
+| 1  | Old\Namespace\MyModel      | Record 1 |
+| 2  | Old\Namespace\MyModel      | Record 2 |
+```
+
+Without remapping, SilverStripe cannot instantiate these records because the old class no longer exists.
+
+**What happens during dev/build:**
+
+1. The extension collects mappings from:
+   - `$legacy_classnames` on each DataObject
+   - `classname_mappings` config (for cases where you can't modify the class)
+
+2. Injects them into SilverStripe's built-in `DatabaseAdmin.classname_value_remapping`
+
+3. SilverStripe runs UPDATE queries to fix the values:
+   ```sql
+   UPDATE MyModel SET ClassName = 'New\Namespace\MyModel'
+   WHERE ClassName = 'Old\Namespace\MyModel'
+   ```
+
+**After remapping:**
+```
+| ID | ClassName                  | Title    |
+|----|----------------------------|----------|
+| 1  | New\Namespace\MyModel      | Record 1 |
+| 2  | New\Namespace\MyModel      | Record 2 |
+```
+
+### When to use `$legacy_classnames` vs `classname_mappings` config
+
+Use `$legacy_classnames` on your DataObject when:
+- You control the class and can add the config to it
+
+Use `classname_mappings` in YAML config when:
+- The old class has been **deleted** from the codebase (you can't add config to a non-existent class)
+- The class is from a **vendor/third-party module** you can't modify
+- You prefer **centralised configuration** in one YAML file
+
+**Common use cases:**
+- Namespace changes (SS3→SS4/5 upgrades)
+- Refactoring/renaming classes
+- Merging multiple classes into one
+- Moving classes between modules
+

@@ -1,0 +1,8 @@
+---
+Name: db-migrations-config
+---
+# Apply DatabaseMigrationExtension to DatabaseAdmin
+# Runs onBeforeBuild to handle class/table migrations before schema updates
+SilverStripe\ORM\DatabaseAdmin:
+  extensions:
+    - Restruct\SilverStripe\Migrations\DatabaseMigrationExtension
