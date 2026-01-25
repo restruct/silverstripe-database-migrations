@@ -6,6 +6,7 @@ use SilverStripe\Core\ClassInfo;
 use SilverStripe\Core\Config\Config;
 use SilverStripe\Core\Config\Configurable;
 use SilverStripe\Core\Extension;
+use SilverStripe\Core\Injector\Injector;
 use SilverStripe\ORM\DataObject;
 use SilverStripe\ORM\DB;
 use SilverStripe\ORM\DatabaseAdmin;
@@ -15,6 +16,7 @@ use SilverStripe\ORM\DatabaseAdmin;
  * - ClassName value remapping (reads from DataObject::$legacy_classnames)
  * - Table renames (reads from DataObject::$legacy_table_names + static config)
  * - Column renames (from static config)
+ * - Table merges (merge deprecated tables into their replacements)
  *
  * Applied to DatabaseAdmin via config to ensure migrations run before
  * SilverStripe processes any schema updates.
@@ -42,7 +44,16 @@ class DatabaseMigrationExtension extends Extension
      */
     private static array $column_renames = [];
 
+    /**
+     * Table merges: merge data from deprecated tables into replacement tables
+     * Format: [source_table => [target => ..., columns => [...], marker => [...], versioned => bool]]
+     * @config
+     * @see TableMergeHandler for full config documentation
+     */
+    private static array $table_merges = [];
+
     private static bool $migrations_run = false;
+    private static bool $merges_run = false;
 
     /**
      * Runs before dev/build processes any DataObject schemas.
@@ -57,6 +68,35 @@ class DatabaseMigrationExtension extends Extension
         $this->setupClassnameRemapping();
         $this->runTableMigrations();
         $this->runColumnRenames();
+    }
+
+    /**
+     * Runs after dev/build has processed schema updates.
+     * Table merges run here so both source and target tables exist.
+     */
+    public function onAfterBuild(): void
+    {
+        if (self::$merges_run) {
+            return;
+        }
+        self::$merges_run = true;
+
+        $this->runTableMerges();
+    }
+
+    /**
+     * Run configured table merges
+     */
+    protected function runTableMerges(): void
+    {
+        $tableMerges = static::config()->get('table_merges') ?: [];
+        if (empty($tableMerges)) {
+            return;
+        }
+
+        /** @var TableMergeHandler $handler */
+        $handler = Injector::inst()->get(TableMergeHandler::class);
+        $handler->runTableMerges($tableMerges);
     }
 
     /**
@@ -184,40 +224,45 @@ class DatabaseMigrationExtension extends Extension
             return;
         }
 
+        $schema = DB::get_schema();
         $conn = DB::get_conn();
-        $existingTables = array_change_key_case(DB::table_list(), CASE_LOWER);
         $renamedCount = 0;
 
         foreach ($columnRenames as $tableName => $columns) {
-            if (!isset($existingTables[strtolower($tableName)])) {
+            if (!$schema->hasTable($tableName)) {
                 continue;
             }
 
-            // Get existing columns for this table
-            $existingColumns = [];
-            $columnsResult = DB::query("SHOW COLUMNS FROM " . $conn->escapeIdentifier($tableName));
-            foreach ($columnsResult as $row) {
-                $existingColumns[strtolower($row['Field'])] = $row;
-            }
+            // Get existing columns using framework helper
+            $existingColumns = $schema->fieldList($tableName);
+            $existingColumnsLower = array_change_key_case($existingColumns, CASE_LOWER);
 
             foreach ($columns as $oldColumn => $newColumn) {
                 $oldColLower = strtolower($oldColumn);
                 $newColLower = strtolower($newColumn);
 
                 // Skip if old column doesn't exist
-                if (!isset($existingColumns[$oldColLower])) {
+                if (!isset($existingColumnsLower[$oldColLower])) {
                     continue;
                 }
 
                 // Skip if new column already exists (migration already done)
-                if (isset($existingColumns[$newColLower])) {
+                if (isset($existingColumnsLower[$newColLower])) {
                     continue;
                 }
 
-                $columnInfo = $existingColumns[$oldColLower];
+                // The fieldList returns column spec strings, but we need raw column info for CHANGE
+                // Use SHOW COLUMNS for the detailed info we need
+                $columnInfo = $this->getColumnInfo($tableName, $oldColumn);
+                if (!$columnInfo) {
+                    continue;
+                }
+
                 $columnType = $columnInfo['Type'];
                 $nullable = $columnInfo['Null'] === 'YES' ? 'NULL' : 'NOT NULL';
-                $default = $columnInfo['Default'] !== null ? "DEFAULT " . $conn->quoteString($columnInfo['Default']) : '';
+                $default = $columnInfo['Default'] !== null
+                    ? "DEFAULT " . $conn->quoteString($columnInfo['Default'])
+                    : '';
 
                 $sql = sprintf(
                     "ALTER TABLE %s CHANGE %s %s %s %s %s",
@@ -241,5 +286,22 @@ class DatabaseMigrationExtension extends Extension
                 'changed'
             );
         }
+    }
+
+    /**
+     * Get detailed column info for a specific column
+     */
+    protected function getColumnInfo(string $table, string $column): ?array
+    {
+        $conn = DB::get_conn();
+        $result = DB::query("SHOW COLUMNS FROM " . $conn->escapeIdentifier($table));
+
+        foreach ($result as $row) {
+            if (strcasecmp($row['Field'], $column) === 0) {
+                return $row;
+            }
+        }
+
+        return null;
     }
 }

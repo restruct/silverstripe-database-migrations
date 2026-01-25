@@ -58,6 +58,18 @@ Restruct\SilverStripe\Migrations\DatabaseMigrationExtension:
   column_renames:
     MyTable:
       old_column_name: new_column_name
+
+  # Table merges: merge deprecated tables into their replacements
+  table_merges:
+    OldBlockType:
+      target: NewBlockType             # Target table to merge into
+      columns:                         # Column mapping (optional)
+        OldImageID: NewImageID
+      marker:                          # Set a value on migrated records (optional)
+        table: Element                 # Table containing the marker column
+        column: Style                  # Column name
+        value: 'old-style'             # Value to set
+      versioned: true                  # Auto-handle _Live and _Versions tables
 ```
 
 ### Running Migrations
@@ -126,6 +138,58 @@ The extension hooks into `DatabaseAdmin::onBeforeBuild()` and renames tables bef
 **Conflict handling:** If both old and new tables exist:
 - If the new table is empty: moves it aside as `_obsolete_NewTable` and renames old→new
 - If both have data: logs a warning for manual resolution
+
+## How Table Merges Work
+
+Table merges handle the case where you're **consolidating two block types** (or similar DataObjects) into one. This is different from a simple rename because the target table already has its own data.
+
+**Use case:** Merging `BlockBanner` into `BlockHero` with a "banner" style variation:
+
+```yaml
+Restruct\SilverStripe\Migrations\DatabaseMigrationExtension:
+  # First: remap ClassName values so records point to the new class
+  classname_mappings:
+    'App\Blocks\BlockBanner': 'App\Blocks\BlockHero'
+
+  # Second: rename columns if needed (runs before merge)
+  column_renames:
+    BlockBanner:
+      BannerImageID: HeroImageID
+
+  # Third: merge table data (runs after schema build)
+  table_merges:
+    BlockBanner:
+      target: BlockHero
+      columns:
+        HeroImageID: HeroImageID        # Source → target column mapping
+      marker:
+        table: Element                  # BaseElement stores Style in Element table
+        column: Style
+        value: 'banner-style'           # Mark migrated records
+      versioned: true                   # Handle _Live and _Versions tables
+```
+
+**What happens during dev/build:**
+
+1. **onBeforeBuild** (before schema):
+   - ClassName remapping → `BlockBanner` records now have `ClassName = 'BlockHero'`
+   - Column renames → `BannerImageID` becomes `HeroImageID`
+
+2. **Schema build** (SilverStripe):
+   - Creates/updates `BlockHero` table structure
+
+3. **onAfterBuild** (after schema):
+   - Table merge:
+     - Inserts `BlockBanner` records that don't exist in `BlockHero`
+     - Updates existing `BlockHero` records where columns are empty
+     - Sets `Element.Style = 'banner-style'` on migrated records
+     - Handles `_Live` and `_Versions` tables if `versioned: true`
+     - Moves `BlockBanner` tables to `_obsolete_BlockBanner` (with counter suffix if already exists)
+
+**Marker field:** The `marker` config is useful for:
+- Distinguishing migrated records from original ones
+- Setting a style/variant value so the correct template is rendered
+- Audit trail of which records came from the deprecated type
 
 ## After Migrations: Cleanup Options
 
