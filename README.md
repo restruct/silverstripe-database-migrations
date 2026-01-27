@@ -1,12 +1,10 @@
 # SilverStripe Database Migrations
 
-Database migration utilities for SilverStripe 5. Handles table renames, classname value remapping, and column renames during `dev/build`.
+Database migration utilities for SilverStripe 5.  
+Handles table renames, classname value remapping, and column renames during `dev/build`.
 
-## Installation
+<img width="642" height="116" alt="Migrations applied during dev/build" src="https://github.com/user-attachments/assets/f471bbe4-9e91-414f-90ce-10d508c4aeea" />
 
-```bash
-composer require restruct/silverstripe-database-migrations
-```
 
 ## Features
 
