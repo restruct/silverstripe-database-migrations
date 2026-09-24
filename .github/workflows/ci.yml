@@ -138,11 +138,21 @@ jobs:
         #   failOnWarning.
         # - SS6 (framework 6, PHPUnit 11): a `flush=1` argument no longer works; framework 6 reads
         #   SS_PHPUNIT_FLUSH instead, which also combines with --testsuite.
+        # A green run is not enough on its own: a suite that silently discovers fewer tests (a
+        # broken autoload-dev mapping, a mirrored install without /tests) still exits 0. So the
+        # step also asserts the exact test count, and the SS6 legs pass --fail-on-empty-test-suite
+        # (PHPUnit 11 only; PHPUnit 9 has no such option). Bump EXPECTED when tests are added.
         run: |
+          EXPECTED='OK (21 tests'
+          set -o pipefail
           if [ "${{ matrix.silverstripe }}" = "5" ]; then
-            vendor/bin/phpunit vendor/restruct/silverstripe-database-migrations/tests flush=1
+            vendor/bin/phpunit vendor/restruct/silverstripe-database-migrations/tests flush=1 | tee phpunit.txt
           else
-            SS_PHPUNIT_FLUSH=1 vendor/bin/phpunit --testsuite database-migrations
+            SS_PHPUNIT_FLUSH=1 vendor/bin/phpunit --fail-on-empty-test-suite --testsuite database-migrations | tee phpunit.txt
+          fi
+          if ! grep -qF "$EXPECTED" phpunit.txt; then
+            echo "::error::expected '$EXPECTED', the suite ran a different number of tests"
+            exit 1
           fi
 
       - name: Consumer-shape database test
@@ -182,6 +192,12 @@ jobs:
         # exactly how the pre-6 DatabaseAdmin block went silently inert (it reported
         # "silverstripe\orm\databaseadmin::$extensions"). config:audit itself always exits 0, so the
         # step greps its output; other packages' findings are printed but not failed on.
+        # config:audit prints only "class::$property", never the value, so a DatabaseAdmin
+        # extensions finding cannot tell whose extension it is. The step therefore reads the
+        # merged config (sake config:dump, YAML after a two-line heading) and fails only when
+        # DatabaseAdmin's extensions name a Restruct\ class - a third-party package's own
+        # DatabaseAdmin block is printed but is not this module's build to fail.
+        # (was: fail on any line of the audit output containing "databaseadmin")
         working-directory: app-host
         run: |
           if [ "${{ matrix.silverstripe }}" = "5" ]; then
@@ -189,9 +205,20 @@ jobs:
           else
             vendor/bin/sake db:build --flush
             vendor/bin/sake config:audit | tee audit.txt
-            if grep -qi 'databaseadmin' audit.txt; then
-              echo "::error::config keyed to DatabaseAdmin, which does not exist on Silverstripe 6"
-              exit 1
+            # if grep -qi 'databaseadmin' audit.txt; then
+            if grep -qiF 'silverstripe\orm\databaseadmin::$extensions' audit.txt; then
+              vendor/bin/sake config:dump | tail -n +3 > config-dump.yml
+              php -r '
+                require "vendor/autoload.php";
+                $config = Symfony\Component\Yaml\Yaml::parseFile($argv[1]);
+                $extensions = $config["silverstripe\\orm\\databaseadmin"]["extensions"] ?? [];
+                $ours = array_filter((array) $extensions, fn ($ext) => is_string($ext) && stripos(ltrim($ext, "\\"), "Restruct\\") === 0);
+                if ($ours) {
+                    echo "::error::DatabaseAdmin (gone on Silverstripe 6) is given extension(s) " . implode(", ", $ours) . "\n";
+                    exit(1);
+                }
+                echo "DatabaseAdmin extensions config found, none of it Restruct\\: not failing\n";
+              ' config-dump.yml
             fi
           fi
 

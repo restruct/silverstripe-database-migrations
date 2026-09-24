@@ -16,7 +16,9 @@ Silverstripe 6 support, alongside Silverstripe 5. No breaking changes for Silver
 - A behavioural test suite (21 tests, run through the real build class on each major) and CI:
   Silverstripe 5 on PHP 8.1 and 8.3, Silverstripe 6 on PHP 8.3 and 8.4, against MariaDB 11.4,
   plus a real `dev/build` per leg and, on Silverstripe 6, a `sake config:audit` check that
-  fails on any config still keyed to `DatabaseAdmin`.
+  fails when `DatabaseAdmin` is still given a `Restruct\` extension (another package's own
+  `DatabaseAdmin` config is reported but does not fail the build). Each test leg also asserts the
+  exact test count, and the Silverstripe 6 legs run with `--fail-on-empty-test-suite`.
 - Table merges print an error-type build message on a partial overlap: when some source rows are
   inserted and others already exist in the target by ID, the existing target rows are not updated,
   and the message names both tables and how many rows were skipped. What a merge writes is
