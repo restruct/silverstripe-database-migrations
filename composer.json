@@ -26,6 +26,8 @@
             "Restruct\\SilverStripe\\Migrations\\Tests\\": "tests/"
         }
     },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
     "funding": [
         {
             "type": "github",
