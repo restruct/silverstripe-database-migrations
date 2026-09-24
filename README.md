@@ -179,7 +179,7 @@ Use `classname_mappings` in YAML config when:
 - You prefer **centralised configuration** in one YAML file
 
 **Common use cases:**
-- Namespace changes (SS3→SS4/5 upgrades)
+- Namespace changes (SS3->SS4/5 upgrades)
 - Refactoring/renaming classes
 - Merging multiple classes into one
 - Moving classes between modules
@@ -189,7 +189,7 @@ Use `classname_mappings` in YAML config when:
 The extension hooks into the build's `onBeforeBuild` (`DatabaseAdmin` on Silverstripe 5, `DbBuild` on Silverstripe 6) and renames tables before Silverstripe processes schema updates.
 
 **Conflict handling:** If both old and new tables exist:
-- If the new table is empty: moves it aside as `_obsolete_NewTable` (or `_obsolete_NewTable_2`, `_3`, ... if an earlier copy is still there) and renames old→new
+- If the new table is empty: moves it aside as `_obsolete_NewTable` (or `_obsolete_NewTable_2`, `_3`, ... if an earlier copy is still there) and renames old->new
 - If both have data: logs a warning for manual resolution
 
 ## How Table Merges Work
@@ -214,7 +214,7 @@ Restruct\SilverStripe\Migrations\DatabaseMigrationExtension:
     BlockBanner:
       target: BlockHero
       columns:
-        HeroImageID: HeroImageID        # Source → target column mapping
+        HeroImageID: HeroImageID        # Source -> target column mapping
       marker:
         table: Element                  # BaseElement stores Style in Element table
         column: Style
@@ -226,8 +226,8 @@ Restruct\SilverStripe\Migrations\DatabaseMigrationExtension:
 
 1. **onBeforeBuild** (before schema):
    - ClassName remapping is registered (Silverstripe applies it in the populate phase, after the
-     schema build) → `BlockBanner` records end up with `ClassName = 'BlockHero'`
-   - Column renames → `BannerImageID` becomes `HeroImageID`
+     schema build) -> `BlockBanner` records end up with `ClassName = 'BlockHero'`
+   - Column renames -> `BannerImageID` becomes `HeroImageID`
 
 2. **Schema build** (SilverStripe):
    - Creates/updates `BlockHero` table structure
@@ -243,7 +243,7 @@ Restruct\SilverStripe\Migrations\DatabaseMigrationExtension:
      - Partial overlap: if some source rows are new and others already exist in the target by ID,
        the new rows are inserted and the existing target rows are NOT updated at all. The build
        prints an error-type message naming both tables and the number of rows skipped, e.g.
-       `! TableMerge: BlockBanner -> BlockHero: 3 source row(s) already exist in BlockHero by ID and were NOT updated`.
+       `! TableMerge: BlockBanner -> BlockHero: 3 source row(s) already exist in BlockHero by ID and were NOT updated (existing rows are only updated when a merge inserts nothing)`.
        The same rules apply to the `_Live` table; `_Versions` rows are only ever inserted (matched
        on `RecordID` + `Version`).
      - Sets `Element.Style = 'banner-style'` on migrated records
