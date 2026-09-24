@@ -209,7 +209,11 @@ class DatabaseMigrationExtension extends Extension
                 $newCount = (int) DB::query("SELECT COUNT(*) FROM " . $conn->escapeIdentifier($newName))->value();
 
                 if ($newCount === 0) {
-                    $obsoleteName = '_obsolete_' . $newName;
+                    // $obsoleteName = '_obsolete_' . $newName;
+                    // A fixed name made RENAME TABLE fail (and dev/build abort) whenever an
+                    // _obsolete_ copy was already there, e.g. on a restored or re-migrated database.
+                    // Same counter scheme as TableMergeHandler::moveTableAside().
+                    $obsoleteName = $this->getFreeObsoleteTableName($newName, $existingTables);
                     DB::alteration_message("Moving empty table aside: {$newName} -> {$obsoleteName}", 'notice');
                     DB::query("RENAME TABLE " . $conn->escapeIdentifier($newName) . " TO " . $conn->escapeIdentifier($obsoleteName));
 
@@ -230,6 +234,26 @@ class DatabaseMigrationExtension extends Extension
                 'changed'
             );
         }
+    }
+
+    /**
+     * First free "_obsolete_<table>" name, suffixed _2, _3, ... when earlier copies exist.
+     *
+     * @param array $existingTables DB::table_list() with lower-cased keys
+     */
+    protected function getFreeObsoleteTableName(string $table, array $existingTables): string
+    {
+        $obsoleteName = '_obsolete_' . $table;
+        if (!isset($existingTables[strtolower($obsoleteName)])) {
+            return $obsoleteName;
+        }
+
+        $counter = 2;
+        while (isset($existingTables[strtolower($obsoleteName . '_' . $counter)])) {
+            $counter++;
+        }
+
+        return $obsoleteName . '_' . $counter;
     }
 
     protected function renameTable($conn, string $oldName, string $newName): void
