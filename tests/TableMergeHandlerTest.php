@@ -59,6 +59,26 @@ class TableMergeHandlerTest extends SapphireTest
         $this->assertTrue($this->tableExists('_obsolete_DbmBanner'));
     }
 
+    /**
+     * Pins what the code does today (0.3.0), not a settled design: when every source ID already
+     * exists in the target (nothing inserted) and there is more than one column pair, the source
+     * values OVERWRITE the same-ID target rows - they do not only fill empty columns.
+     */
+    public function testSameIdTargetRowsAreOverwrittenWhenNothingIsInserted(): void
+    {
+        $this->createRawTable('DbmBanner', '"ID" int, "Title" varchar(50), "Extra" varchar(50)');
+        $this->createRawTable('DbmHero', '"ID" int, "Title" varchar(50), "Extra" varchar(50)');
+        DB::query('INSERT INTO "DbmBanner" VALUES (1, \'src1\', \'e1\')');
+        DB::query('INSERT INTO "DbmHero" VALUES (1, \'dst1\', \'old\')');
+
+        $merged = TableMergeHandler::create()->runTableMerges(['DbmBanner' => ['target' => 'DbmHero']]);
+
+        $this->assertSame(1, $merged);
+        $this->assertSame(1, $this->rowCount('DbmHero'));
+        $this->assertSame(['src1'], $this->column('DbmHero', 'Title'));
+        $this->assertSame(['e1'], $this->column('DbmHero', 'Extra'));
+    }
+
     public function testMarkerIsSetOnlyOnMigratedRecordsWhereEmpty(): void
     {
         $this->createBlockTables();
