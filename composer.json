@@ -10,11 +10,28 @@
         }
     ],
     "require": {
-        "silverstripe/framework": "^5.0"
+        "php": "^8.1",
+        "silverstripe/framework": "^5 || ^6"
+    },
+    "require-dev": {
+        "silverstripe/recipe-testing": "^3 || ^4"
     },
     "autoload": {
         "psr-4": {
             "Restruct\\SilverStripe\\Migrations\\": "src/"
         }
-    }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Restruct\\SilverStripe\\Migrations\\Tests\\": "tests/"
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "funding": [
+        {
+            "type": "github",
+            "url": "https://github.com/sponsors/restruct"
+        }
+    ]
 }

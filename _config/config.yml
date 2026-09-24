@@ -1,8 +1,24 @@
 ---
 Name: db-migrations-config
+Only:
+  classexists: SilverStripe\ORM\DatabaseAdmin
 ---
 # Apply DatabaseMigrationExtension to DatabaseAdmin
 # Runs onBeforeBuild to handle class/table migrations before schema updates
+# Silverstripe 5: dev/build is run by DatabaseAdmin::doBuild(). The class is gone in Silverstripe 6,
+# and a block keyed to a class that does not exist is silently inert, so each major gets its own
+# guarded fragment rather than one unconditional block.
 SilverStripe\ORM\DatabaseAdmin:
+  extensions:
+    - Restruct\SilverStripe\Migrations\DatabaseMigrationExtension
+---
+Name: db-migrations-config-dbbuild
+Only:
+  classexists: SilverStripe\Dev\Command\DbBuild
+---
+# Silverstripe 6: dev/build (`sake db:build`) is run by DbBuild::doBuild(), which fires the same
+# onBeforeBuild/onAfterBuild hooks (args: $output, $populate, $testMode) and owns the
+# classname_value_remapping config that DatabaseAdmin held on Silverstripe 5.
+SilverStripe\Dev\Command\DbBuild:
   extensions:
     - Restruct\SilverStripe\Migrations\DatabaseMigrationExtension
