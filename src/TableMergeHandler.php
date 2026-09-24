@@ -204,6 +204,15 @@ class TableMergeHandler
             $targetColsSql[] = $conn->escapeIdentifier($targetCol);
         }
 
+        // Count the source rows whose ID already exists in the target. This must happen BEFORE the
+        // insert: afterwards the freshly inserted rows would match the join too. Only used for the
+        // partial-overlap warning below; it does not change what is written.
+        $existing = (int) DB::query(sprintf(
+            "SELECT COUNT(*) FROM %s s INNER JOIN %s t ON s.ID = t.ID",
+            $conn->escapeIdentifier($source),
+            $conn->escapeIdentifier($target)
+        ))->value();
+
         // Insert records that don't exist in target
         $sql = sprintf(
             "INSERT INTO %s (%s) SELECT %s FROM %s s LEFT JOIN %s t ON s.ID = t.ID WHERE t.ID IS NULL",
@@ -225,6 +234,24 @@ class TableMergeHandler
 
         if ($inserted > 0) {
             DB::alteration_message("{$target}: inserted {$inserted} record(s)", 'notice');
+        }
+
+        // Partial overlap: some rows were inserted, so the same-ID update above did not run and the
+        // source values of the rows that already existed in the target were dropped. Say so, loudly,
+        // rather than letting the merge look complete. (Whether they should be merged is an open
+        // design question for 1.0; the write behaviour is deliberately unchanged here.)
+        if ($inserted > 0 && $existing > 0) {
+            DB::alteration_message(
+                sprintf(
+                    'TableMerge: %s -> %s: %d source row(s) already exist in %s by ID and were NOT updated'
+                    . ' (existing rows are only updated when a merge inserts nothing)',
+                    $source,
+                    $target,
+                    $existing,
+                    $target
+                ),
+                'error'
+            );
         }
     }
 

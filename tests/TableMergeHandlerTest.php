@@ -79,6 +79,57 @@ class TableMergeHandlerTest extends SapphireTest
         $this->assertSame(['e1'], $this->column('DbmHero', 'Extra'));
     }
 
+    /**
+     * Partial overlap: some source rows are new (inserted), some already exist in the target by ID.
+     * The existing rows are NOT updated (the same-ID update only runs when nothing is inserted);
+     * the merge must warn about the skipped rows instead of looking complete.
+     */
+    public function testPartialOverlapWarnsAboutSkippedRowsAndLeavesThemUnchanged(): void
+    {
+        $this->createRawTable('DbmBanner', '"ID" int, "Title" varchar(50), "Extra" varchar(50)');
+        $this->createRawTable('DbmHero', '"ID" int, "Title" varchar(50), "Extra" varchar(50)');
+        DB::query('INSERT INTO "DbmBanner" VALUES (1, \'src1\', \'e1\'), (2, \'src2\', \'e2\'), (3, \'src3\', \'e3\')');
+        DB::query('INSERT INTO "DbmHero" VALUES (1, \'dst1\', \'old\')');
+
+        // alteration_message() echoes in CLI unless the schema is quiet, so capture it
+        DB::quiet(false);
+        ob_start();
+        try {
+            TableMergeHandler::create()->runTableMerges(['DbmBanner' => ['target' => 'DbmHero']]);
+        } finally {
+            $output = ob_get_clean();
+            DB::quiet(true);
+        }
+
+        // What is written is unchanged: new rows inserted, the existing row left as it was
+        $this->assertSame(['dst1', 'src2', 'src3'], $this->column('DbmHero', 'Title'));
+        $this->assertSame(['old', 'e2', 'e3'], $this->column('DbmHero', 'Extra'));
+        // The warning is an error-type message naming both tables and the skipped count
+        $this->assertStringContainsString(
+            '! TableMerge: DbmBanner -> DbmHero: 1 source row(s) already exist in DbmHero by ID and were NOT updated',
+            $output
+        );
+    }
+
+    public function testNoOverlapWarningWhenAllRowsAreNew(): void
+    {
+        $this->createBlockTables();
+        DB::query('INSERT INTO "DbmBanner" VALUES (1, \'b1\', 11)');
+        DB::query('INSERT INTO "DbmHero" VALUES (2, \'h2\', 12)');
+
+        DB::quiet(false);
+        ob_start();
+        try {
+            TableMergeHandler::create()->runTableMerges(['DbmBanner' => ['target' => 'DbmHero']]);
+        } finally {
+            $output = ob_get_clean();
+            DB::quiet(true);
+        }
+
+        $this->assertStringContainsString('DbmHero: inserted 1 record(s)', $output);
+        $this->assertStringNotContainsString('were NOT updated', $output);
+    }
+
     public function testMarkerIsSetOnlyOnMigratedRecordsWhereEmpty(): void
     {
         $this->createBlockTables();
