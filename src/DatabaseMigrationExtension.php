@@ -9,7 +9,6 @@ use SilverStripe\Core\Extension;
 use SilverStripe\Core\Injector\Injector;
 use SilverStripe\ORM\DataObject;
 use SilverStripe\ORM\DB;
-use SilverStripe\ORM\DatabaseAdmin;
 
 /**
  * Handles database migrations during dev/build:
@@ -20,6 +19,10 @@ use SilverStripe\ORM\DatabaseAdmin;
  *
  * Applied to DatabaseAdmin via config to ensure migrations run before
  * SilverStripe processes any schema updates.
+ *
+ * Silverstripe 5 builds the database through SilverStripe\ORM\DatabaseAdmin, Silverstripe 6 through
+ * SilverStripe\Dev\Command\DbBuild. Both fire onBeforeBuild/onAfterBuild and both own a
+ * classname_value_remapping config; _config/config.yml applies this extension to whichever exists.
  */
 class DatabaseMigrationExtension extends Extension
 {
@@ -122,15 +125,37 @@ class DatabaseMigrationExtension extends Extension
         }
 
         if (!empty($remappings)) {
-            $existingRemappings = Config::inst()->get(DatabaseAdmin::class, 'classname_value_remapping') ?: [];
+            // Write to the class that is actually running the build (DatabaseAdmin on SS5, DbBuild on
+            // SS6): its migrateClassNames() reads static::config(), so config set on any other class is
+            // never consulted. This used to be hardcoded to DatabaseAdmin::class, which does not exist on
+            // SS6 - the remapping would have been set on a dead key and silently never applied.
+            $buildClass = $this->getBuildClass();
+            $existingRemappings = Config::inst()->get($buildClass, 'classname_value_remapping') ?: [];
             $mergedRemappings = array_merge($existingRemappings, $remappings);
-            Config::modify()->set(DatabaseAdmin::class, 'classname_value_remapping', $mergedRemappings);
+            Config::modify()->set($buildClass, 'classname_value_remapping', $mergedRemappings);
 
             DB::alteration_message(
                 sprintf('DatabaseMigration: Registered %d classname remappings', count($remappings)),
                 'notice'
             );
         }
+    }
+
+    /**
+     * The class whose doBuild() is running: the extension's owner when invoked through the hook,
+     * otherwise whichever build class this Silverstripe major has.
+     */
+    protected function getBuildClass(): string
+    {
+        $owner = $this->getOwner();
+        if ($owner) {
+            return get_class($owner);
+        }
+
+        // Class names as strings, not ::class on an import: neither class exists on both majors.
+        return class_exists('SilverStripe\\Dev\\Command\\DbBuild')
+            ? 'SilverStripe\\Dev\\Command\\DbBuild'
+            : 'SilverStripe\\ORM\\DatabaseAdmin';
     }
 
     /**
