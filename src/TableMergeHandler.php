@@ -166,7 +166,10 @@ class TableMergeHandler
      * Migrate data from source to target table
      *
      * Inserts records from source that don't exist in target (by ID).
-     * Also updates existing target records where columns are empty/null.
+     * If that inserts nothing and there is more than one column pair, copies the source values
+     * onto the same-ID target rows, overwriting them (see updateExistingRecords()).
+     * (was: "Also updates existing target records where columns are empty/null." - it never
+     * checked for empty values.)
      *
      * @param string $source Source table name
      * @param string $target Target table name
@@ -214,7 +217,8 @@ class TableMergeHandler
         DB::query($sql);
         $inserted = DB::affected_rows();
 
-        // Update existing records where target columns are empty/null
+        // Copy source values onto same-ID target rows (overwrites; only when nothing was inserted and more than one column pair)
+        // was: Update existing records where target columns are empty/null
         if ($inserted === 0 && count($columnPairs) > 1) {
             $this->updateExistingRecords($source, $target, $columnPairs);
         }
@@ -356,7 +360,8 @@ class TableMergeHandler
     }
 
     /**
-     * Update existing records in target where values are empty
+     * Overwrite existing records in target with the source values
+     * (was: "Update existing records in target where values are empty" - there is no empty check)
      *
      * Called when source records already exist in target by ID.
      * Copies column values from source to target.
