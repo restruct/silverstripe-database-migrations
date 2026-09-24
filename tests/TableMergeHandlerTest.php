@@ -130,6 +130,35 @@ class TableMergeHandlerTest extends SapphireTest
         $this->assertStringNotContainsString('were NOT updated', $output);
     }
 
+    /**
+     * Full overlap: every source row already exists in the target, nothing is inserted, and the
+     * same-ID update DOES run. The partial-overlap warning must not fire here, or an operator is
+     * told rows were dropped when they were in fact copied. Pins the `$inserted > 0` half of the
+     * warning condition (the partial-overlap test above only pins the `$existing > 0` half).
+     */
+    public function testNoOverlapWarningWhenFullOverlapOverwritesTarget(): void
+    {
+        $this->createRawTable('DbmBanner', '"ID" int, "Title" varchar(50), "Extra" varchar(50)');
+        $this->createRawTable('DbmHero', '"ID" int, "Title" varchar(50), "Extra" varchar(50)');
+        DB::query('INSERT INTO "DbmBanner" VALUES (1, \'src1\', \'e1\')');
+        DB::query('INSERT INTO "DbmHero" VALUES (1, \'dst1\', \'old\')');
+
+        // alteration_message() echoes in CLI unless the schema is quiet, so capture it
+        DB::quiet(false);
+        ob_start();
+        try {
+            TableMergeHandler::create()->runTableMerges(['DbmBanner' => ['target' => 'DbmHero']]);
+        } finally {
+            $output = ob_get_clean();
+            DB::quiet(true);
+        }
+
+        // The overwrite happened (same precondition as testSameIdTargetRowsAreOverwrittenWhenNothingIsInserted)
+        $this->assertSame(['src1'], $this->column('DbmHero', 'Title'));
+        // ...so no "were NOT updated" warning may be printed
+        $this->assertStringNotContainsString('were NOT updated', $output);
+    }
+
     public function testMarkerIsSetOnlyOnMigratedRecordsWhereEmpty(): void
     {
         $this->createBlockTables();
