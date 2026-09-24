@@ -13,10 +13,14 @@ Silverstripe 6 support, alongside Silverstripe 5. No breaking changes for Silver
   written to the config of the class actually running the build. With the 0.2 code on Silverstripe
   6 the extension would have been applied to a class that does not exist, and none of the
   migrations would have run - with no error.
-- A behavioural test suite (18 tests, run through the real build class on each major) and CI:
+- A behavioural test suite (21 tests, run through the real build class on each major) and CI:
   Silverstripe 5 on PHP 8.1 and 8.3, Silverstripe 6 on PHP 8.3 and 8.4, against MariaDB 11.4,
   plus a real `dev/build` per leg and, on Silverstripe 6, a `sake config:audit` check that
   fails on any config still keyed to `DatabaseAdmin`.
+- Table merges print an error-type build message on a partial overlap: when some source rows are
+  inserted and others already exist in the target by ID, the existing target rows are not updated,
+  and the message names both tables and how many rows were skipped. What a merge writes is
+  unchanged; before this the skipped rows were dropped without a word.
 - `LICENSE` file (MIT, as already declared in `composer.json`).
 - `funding` in `composer.json`.
 
@@ -33,7 +37,9 @@ Silverstripe 6 support, alongside Silverstripe 5. No breaking changes for Silver
 - README: requirements and compatibility table, every config option, how to run the tests, and two
   corrections - classname remapping is applied in the populate phase (not in `onBeforeBuild`), and
   a table merge that inserts nothing overwrites same-ID target rows rather than filling only empty
-  columns.
+  columns. That update only runs when the merge inserted no rows at all and there is more than one
+  column pair (`ID` counts as one); on a partial overlap the existing target rows are left as they
+  were (see the new warning above). The merge semantics are pinned by tests but not final for 1.0.
 
 ### If you are upgrading a project to Silverstripe 6
 

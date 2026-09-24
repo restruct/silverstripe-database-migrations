@@ -237,7 +237,15 @@ Restruct\SilverStripe\Migrations\DatabaseMigrationExtension:
      - Inserts `BlockBanner` records that don't exist in `BlockHero`
      - If no rows needed inserting (every source ID already exists in the target), copies the
        mapped and same-named columns from source onto the target rows with the same ID. This
-       overwrites the target values, it does not only fill empty ones.
+       overwrites the target values, it does not only fill empty ones. It only happens when there
+       is more than one column pair (`ID` counts as one), so a merge whose only shared column is
+       `ID` updates nothing.
+     - Partial overlap: if some source rows are new and others already exist in the target by ID,
+       the new rows are inserted and the existing target rows are NOT updated at all. The build
+       prints an error-type message naming both tables and the number of rows skipped, e.g.
+       `! TableMerge: BlockBanner -> BlockHero: 3 source row(s) already exist in BlockHero by ID and were NOT updated`.
+       The same rules apply to the `_Live` table; `_Versions` rows are only ever inserted (matched
+       on `RecordID` + `Version`).
      - Sets `Element.Style = 'banner-style'` on migrated records
      - Handles `_Live` and `_Versions` tables if `versioned: true`
      - Moves `BlockBanner` tables to `_obsolete_BlockBanner` (with counter suffix if already exists)
