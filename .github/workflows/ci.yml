@@ -145,17 +145,54 @@ jobs:
             SS_PHPUNIT_FLUSH=1 vendor/bin/phpunit --testsuite database-migrations
           fi
 
+      - name: Consumer-shape database test
+        # A module's own suite cannot catch an unbuildable fixture in its tests/ dir (e.g. an
+        # abstract DataObject): that only fatals the temp-database build of a CONSUMING project.
+        # So a plain $usesDatabase test runs from the host too, with the same per-major flush.
+        working-directory: app-host
+        run: |
+          mkdir -p app/tests
+          cat > app/tests/ConsumerDbTest.php <<'PHP'
+          <?php
+
+          use SilverStripe\Dev\SapphireTest;
+          use SilverStripe\Security\Member;
+
+          class ConsumerDbTest extends SapphireTest
+          {
+              protected $usesDatabase = true;
+
+              public function testTempDatabaseBuilds()
+              {
+                  $m = Member::create(['FirstName' => 'x']);
+                  $m->write();
+                  $this->assertGreaterThan(0, $m->ID);
+              }
+          }
+          PHP
+          if [ "${{ matrix.silverstripe }}" = "5" ]; then
+            vendor/bin/phpunit app/tests flush=1
+          else
+            SS_PHPUNIT_FLUSH=1 vendor/bin/phpunit app/tests
+          fi
+
       - name: Build the database through the real entry point
         # The suite fires the hooks directly; this proves a real dev/build boots with the module
-        # applied. On SS6 config:audit also fails on YAML keyed to a class that does not exist,
-        # which is exactly how the pre-6 DatabaseAdmin block would have gone silently inert.
+        # applied. On SS6, config:audit lists YAML keyed to a class that does not exist - which is
+        # exactly how the pre-6 DatabaseAdmin block went silently inert (it reported
+        # "silverstripe\orm\databaseadmin::$extensions"). config:audit itself always exits 0, so the
+        # step greps its output; other packages' findings are printed but not failed on.
         working-directory: app-host
         run: |
           if [ "${{ matrix.silverstripe }}" = "5" ]; then
             php vendor/silverstripe/framework/cli-script.php dev/build flush=1
           else
             vendor/bin/sake db:build --flush
-            vendor/bin/sake config:audit
+            vendor/bin/sake config:audit | tee audit.txt
+            if grep -qi 'databaseadmin' audit.txt; then
+              echo "::error::config keyed to DatabaseAdmin, which does not exist on Silverstripe 6"
+              exit 1
+            fi
           fi
 
   lint:

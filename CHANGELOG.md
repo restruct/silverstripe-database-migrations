@@ -15,7 +15,8 @@ Silverstripe 6 support, alongside Silverstripe 5. No breaking changes for Silver
   migrations would have run - with no error.
 - A behavioural test suite (18 tests, run through the real build class on each major) and CI:
   Silverstripe 5 on PHP 8.1 and 8.3, Silverstripe 6 on PHP 8.3 and 8.4, against MariaDB 11.4,
-  plus a real `dev/build` per leg and `sake config:audit` on Silverstripe 6.
+  plus a real `dev/build` per leg and, on Silverstripe 6, a `sake config:audit` check that
+  fails on any config still keyed to `DatabaseAdmin`.
 - `LICENSE` file (MIT, as already declared in `composer.json`).
 - `funding` in `composer.json`.
 
