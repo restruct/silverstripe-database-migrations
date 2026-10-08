@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.1 (2026-10-08)
+
+### Fixed
+
+- **Column renames kept only the type, NULL-ability and default** (#2). `column_renames` rebuilt
+  the column with `ALTER TABLE ... CHANGE` from `SHOW COLUMNS`, which dropped `AUTO_INCREMENT`,
+  `ON UPDATE CURRENT_TIMESTAMP`, the column's collation and its comment, and quoted an expression
+  default into a string (`DEFAULT 'CURRENT_TIMESTAMP'`, which a timestamp column rejects, so the
+  build aborted). Renames now use `ALTER TABLE ... RENAME COLUMN` (MySQL 8.0+, MariaDB 10.5.2+),
+  which leaves the definition alone; older servers get a `CHANGE` that repeats the column
+  definition exactly as `SHOW CREATE TABLE` prints it, with references to the column itself (a
+  column-level `CHECK`, which MariaDB adds to every JSON column) following the rename, run under
+  the same `ANSI_QUOTES` mode it was read in so a project `sql_mode` with `NO_BACKSLASH_ESCAPES`
+  cannot change escaped defaults or comments. Tested on MariaDB 10.4, 11.4 and 12.3 and MySQL 5.7
+  and 8.0, both paths on each.
+- **A second build in the same process skipped every migration and merge** (#4). The run-once
+  guards were set by the first `dev/build` / `db:build` and never cleared, so any later build in
+  that process (a test run, a long-running worker) did nothing, without a word. They are now
+  cleared when a build starts, and they are `protected static` run-state instead of `private
+  static` (which on this `Configurable` class also made them config).
+
 ## 0.3.0 (2026-09-25)
 
 Silverstripe 6 support, alongside Silverstripe 5. No breaking changes for Silverstripe 5 projects.
