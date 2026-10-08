@@ -417,6 +417,23 @@ class DatabaseMigrationExtensionTest extends SapphireTest
         $this->assertSame('"Old" stays', $col['Comment']);
         DB::query('INSERT INTO "DbmLit" ("ID") VALUES (1)');
         $this->assertSame(['Old "Old" `Old`'], $this->column('DbmLit', 'New'));
+
+        if (!$this->isMariaDb()) {
+            return;
+        }
+        // MariaDB keeps a column CHECK in the definition and prints the literal's quote as \', so
+        // the literal must be skipped as one token: read up to that \' instead, the rest
+        // (s "A") would be taken for a column reference and the constraint's literal rewritten.
+        $this->createRawTable('DbmLitCheck', '"ID" int, "A" varchar(20) CHECK ("A" <> \'x\\\'s "A"\')');
+
+        $this->renameColumn('DbmLitCheck', 'A', 'A2', true);
+
+        $this->assertNotNull($this->fullColumn('DbmLitCheck', 'A2'));
+        DB::query('INSERT INTO "DbmLitCheck" ("ID", "A2") VALUES (1, \'ok\')');
+        $this->assertSame(['ok'], $this->column('DbmLitCheck', 'A2'));
+        // The literal is unchanged, so its exact value is still the one the CHECK rejects
+        $this->expectException(\Throwable::class);
+        DB::query('INSERT INTO "DbmLitCheck" ("ID", "A2") VALUES (2, \'x\\\'s "A"\')');
     }
 
     /**
