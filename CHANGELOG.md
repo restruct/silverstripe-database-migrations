@@ -12,6 +12,11 @@
   which leaves the definition alone; older servers get a `CHANGE` that repeats the column
   definition exactly as `SHOW CREATE TABLE` prints it. Tested on MariaDB 10.4, 11.4 and 12.3 and
   MySQL 5.7 and 8.0, both paths on each.
+- **A second build in the same process skipped every migration and merge** (#4). The run-once
+  guards were set by the first `dev/build` / `db:build` and never cleared, so any later build in
+  that process (a test run, a long-running worker) did nothing, without a word. They are now
+  cleared when a build starts, and they are `protected static` run-state instead of `private
+  static` (which on this `Configurable` class also made them config).
 
 ## 0.3.0 (2026-09-25)
 

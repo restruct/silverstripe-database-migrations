@@ -55,17 +55,30 @@ class DatabaseMigrationExtension extends Extension
      */
     private static array $table_merges = [];
 
-    private static bool $migrations_run = false;
-    private static bool $merges_run = false;
+    // private static bool $migrations_run = false;
+    // private static bool $merges_run = false;
+    # (#4) Run-state, not config: as private statics on a Configurable class they were also read
+    # into the extension's config. Protected so the config layer leaves them alone.
+    protected static bool $migrations_run = false;
+    protected static bool $merges_run = false;
 
     /**
      * Runs before dev/build processes any DataObject schemas.
      */
     public function onBeforeBuild(): void
     {
-        if (self::$migrations_run) {
-            return;
-        }
+        // if (self::$migrations_run) {
+        //     return;
+        // }
+        # (#4) That guard was set by the first build and never cleared, so every later build in the
+        # same process (a test run, a long-running worker) skipped all migrations and merges. Both
+        # build classes (DatabaseAdmin::doBuild() on SS5, DbBuild::doBuild() on SS6) fire
+        # onBeforeBuild exactly once per build, so reaching this hook IS the start of a new build:
+        # clear the guards here. Migrations need no guard of their own - each one is a no-op when
+        # it is already done (old table/column gone, new one present) - so running them again is
+        # harmless even if a caller fires the hook twice.
+        # migrations_run stays as the record that this build's migrations have run.
+        self::$merges_run = false;
         self::$migrations_run = true;
 
         $this->setupClassnameRemapping();

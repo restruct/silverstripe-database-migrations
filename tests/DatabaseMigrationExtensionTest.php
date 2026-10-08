@@ -383,4 +383,59 @@ class DatabaseMigrationExtensionTest extends SapphireTest
         $this->assertSame(['moved'], $this->column('DbmMergeDst', 'Title'));
         $this->assertFalse($this->tableExists('DbmMergeSrc'));
     }
+
+    /**
+     * Regression (#4): the run-once guards were set by the first build and never cleared, so every
+     * later build in the same process (a test run, a long-running worker) silently skipped all
+     * migrations and merges. Deliberately no resetRunFlags() between the two builds.
+     */
+    public function testASecondBuildInTheSameProcessRunsMigrationsAndMergesAgain(): void
+    {
+        // Build 1: a column rename and a table merge
+        Config::modify()->set(DatabaseMigrationExtension::class, 'column_renames', [
+            'DbmCols' => ['OldName' => 'NewName'],
+        ]);
+        Config::modify()->set(DatabaseMigrationExtension::class, 'table_merges', [
+            'DbmMergeSrc' => ['target' => 'DbmMergeDst'],
+        ]);
+        $this->createRawTable('DbmCols', '"ID" int, "OldName" varchar(50), "OtherOld" varchar(50)');
+        $this->createRawTable('DbmMergeSrc', '"ID" int, "Title" varchar(50)');
+        $this->createRawTable('DbmMergeDst', '"ID" int, "Title" varchar(50)');
+        DB::query('INSERT INTO "DbmMergeSrc" ("ID", "Title") VALUES (1, \'first\')');
+
+        $this->fireHook('onBeforeBuild');
+        $this->fireHook('onAfterBuild');
+        $this->assertSame(['NewName'], $this->columnsLike('DbmCols', 'NewName'));
+        $this->assertSame(['first'], $this->column('DbmMergeDst', 'Title'));
+
+        // Build 2 in the same process: new config, new source data
+        Config::modify()->set(DatabaseMigrationExtension::class, 'column_renames', [
+            'DbmCols' => ['OtherOld' => 'OtherNew'],
+        ]);
+        Config::modify()->set(DatabaseMigrationExtension::class, 'table_merges', [
+            'DbmMergeSrc2' => ['target' => 'DbmMergeDst'],
+        ]);
+        $this->createRawTable('DbmMergeSrc2', '"ID" int, "Title" varchar(50)');
+        DB::query('INSERT INTO "DbmMergeSrc2" ("ID", "Title") VALUES (2, \'second\')');
+
+        $this->fireHook('onBeforeBuild');
+        $this->fireHook('onAfterBuild');
+        $this->assertSame(['OtherNew'], $this->columnsLike('DbmCols', 'OtherNew'), 'second build skipped the column rename');
+        $this->assertSame(['first', 'second'], $this->column('DbmMergeDst', 'Title'), 'second build skipped the merge');
+    }
+
+    /**
+     * Regression (#4): the guards were private statics on a Configurable class, so they were also
+     * read into (and exposed through) the extension's config.
+     */
+    public function testRunGuardsAreNotConfig(): void
+    {
+        $this->assertNull(Config::inst()->get(DatabaseMigrationExtension::class, 'migrations_run'));
+        $this->assertNull(Config::inst()->get(DatabaseMigrationExtension::class, 'merges_run'));
+    }
+
+    protected function columnsLike(string $table, string $column): array
+    {
+        return DB::query(sprintf('SHOW COLUMNS FROM "%s" LIKE %s', $table, DB::get_conn()->quoteString($column)))->column('Field');
+    }
 }
