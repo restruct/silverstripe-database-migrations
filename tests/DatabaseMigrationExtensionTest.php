@@ -3,6 +3,7 @@
 namespace Restruct\SilverStripe\Migrations\Tests;
 
 use Restruct\SilverStripe\Migrations\DatabaseMigrationExtension;
+use Restruct\SilverStripe\Migrations\Tests\Stub\ChangeOnlyMigrationExtension;
 use Restruct\SilverStripe\Migrations\Tests\Stub\MigratedThing;
 use SilverStripe\Core\Config\Config;
 use SilverStripe\Core\Injector\Injector;
@@ -211,6 +212,142 @@ class DatabaseMigrationExtensionTest extends SapphireTest
         // MariaDB reports a string default quoted, MySQL unquoted
         $this->assertSame('dflt', trim((string) $cols['NewName']['Default'], "'"));
         $this->assertSame(['value'], $this->column('DbmCols', 'NewName'));
+    }
+
+    /**
+     * Configure one column rename and run onBeforeBuild. With $viaChange the extension is swapped
+     * for one that takes the CHANGE fallback (servers without RENAME COLUMN), so both paths run on
+     * any server.
+     */
+    protected function renameColumn(string $table, string $old, string $new, bool $viaChange): void
+    {
+        $renames = [$table => [$old => $new]];
+        Config::modify()->set(DatabaseMigrationExtension::class, 'column_renames', $renames);
+        if ($viaChange) {
+            Config::modify()->set(ChangeOnlyMigrationExtension::class, 'column_renames', $renames);
+            // Extensible resolves extension instances through Injector::get()
+            Injector::inst()->registerService(new ChangeOnlyMigrationExtension(), DatabaseMigrationExtension::class);
+        }
+
+        $this->fireHook('onBeforeBuild');
+    }
+
+    /**
+     * SHOW FULL COLUMNS row of one column, or null when it does not exist.
+     */
+    protected function fullColumn(string $table, string $column): ?array
+    {
+        foreach (DB::query(sprintf('SHOW FULL COLUMNS FROM "%s"', $table)) as $row) {
+            if ($row['Field'] === $column) {
+                return $row;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Regression (#2): the rename was rebuilt from Type/Null/Default, which dropped AUTO_INCREMENT,
+     * so the next insert without an ID got 0 (or failed) instead of the next sequence value.
+     */
+    protected function assertRenameKeepsAutoIncrement(bool $viaChange): void
+    {
+        $this->createRawTable('DbmAi', '"OldId" int NOT NULL AUTO_INCREMENT PRIMARY KEY, "Title" varchar(50)');
+        DB::query('INSERT INTO "DbmAi" ("Title") VALUES (\'first\')');
+
+        $this->renameColumn('DbmAi', 'OldId', 'NewId', $viaChange);
+
+        $this->assertNull($this->fullColumn('DbmAi', 'OldId'));
+        $col = $this->fullColumn('DbmAi', 'NewId');
+        $this->assertNotNull($col);
+        $this->assertStringContainsStringIgnoringCase('auto_increment', $col['Extra']);
+        $this->assertSame('PRI', $col['Key']);
+        DB::query('INSERT INTO "DbmAi" ("Title") VALUES (\'second\')');
+        $this->assertSame(['1', '2'], array_map('strval', $this->column('DbmAi', 'NewId', 'Title')));
+    }
+
+    public function testColumnRenameKeepsAutoIncrement(): void
+    {
+        $this->assertRenameKeepsAutoIncrement(false);
+    }
+
+    public function testColumnRenameKeepsAutoIncrementViaChange(): void
+    {
+        $this->assertRenameKeepsAutoIncrement(true);
+    }
+
+    /**
+     * Regression (#2): an expression default was quoted into a string literal ('CURRENT_TIMESTAMP')
+     * and ON UPDATE CURRENT_TIMESTAMP (in Extra) was dropped.
+     */
+    protected function assertRenameKeepsCurrentTimestamp(bool $viaChange): void
+    {
+        $this->createRawTable(
+            'DbmStamp',
+            '"ID" int, "OldStamp" timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP'
+        );
+
+        $this->renameColumn('DbmStamp', 'OldStamp', 'NewStamp', $viaChange);
+
+        $col = $this->fullColumn('DbmStamp', 'NewStamp');
+        $this->assertNotNull($col);
+        // MySQL reports "CURRENT_TIMESTAMP", MariaDB "current_timestamp()"; a quoted literal would
+        // start with a quote (MariaDB) or not be accepted for a timestamp at all
+        $this->assertMatchesRegularExpression('/^current_timestamp/i', (string) $col['Default']);
+        $this->assertStringContainsStringIgnoringCase('on update current_timestamp', $col['Extra']);
+        $this->assertSame('NO', $col['Null']);
+
+        // The default is evaluated, not stored as text: an insert without the column gets "now"
+        DB::query('INSERT INTO "DbmStamp" ("ID") VALUES (1)');
+        $stamp = (string) DB::query('SELECT "NewStamp" FROM "DbmStamp"')->value();
+        $this->assertNotSame('0000-00-00 00:00:00', $stamp);
+        $this->assertGreaterThan(strtotime('-1 day'), strtotime($stamp));
+    }
+
+    public function testColumnRenameKeepsCurrentTimestampDefaultAndOnUpdate(): void
+    {
+        $this->assertRenameKeepsCurrentTimestamp(false);
+    }
+
+    public function testColumnRenameKeepsCurrentTimestampDefaultAndOnUpdateViaChange(): void
+    {
+        $this->assertRenameKeepsCurrentTimestamp(true);
+    }
+
+    /**
+     * Regression (#2): the column's own collation (here differing from the table's) and its comment
+     * were dropped; a literal default must still come back as the same literal.
+     */
+    protected function assertRenameKeepsCollationCommentAndDefault(bool $viaChange): void
+    {
+        DB::query(
+            'CREATE TABLE "DbmColl" ("ID" int, '
+            . '"OldName" varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT \'it\'\'s\' COMMENT \'keep me, please\') '
+            . 'DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+        );
+        DB::query('INSERT INTO "DbmColl" ("ID", "OldName") VALUES (1, \'value\')');
+
+        $this->renameColumn('DbmColl', 'OldName', 'NewName', $viaChange);
+
+        $col = $this->fullColumn('DbmColl', 'NewName');
+        $this->assertNotNull($col);
+        $this->assertSame('utf8mb4_bin', $col['Collation']);
+        $this->assertSame('keep me, please', $col['Comment']);
+        $this->assertSame('varchar(50)', $col['Type']);
+        $this->assertSame('NO', $col['Null']);
+        $this->assertSame(['value'], $this->column('DbmColl', 'NewName'));
+        // Literal default: check by effect, since MariaDB reports it quoted and MySQL unquoted
+        DB::query('INSERT INTO "DbmColl" ("ID") VALUES (2)');
+        $this->assertSame(['value', "it's"], $this->column('DbmColl', 'NewName'));
+    }
+
+    public function testColumnRenameKeepsCollationCommentAndDefault(): void
+    {
+        $this->assertRenameKeepsCollationCommentAndDefault(false);
+    }
+
+    public function testColumnRenameKeepsCollationCommentAndDefaultViaChange(): void
+    {
+        $this->assertRenameKeepsCollationCommentAndDefault(true);
     }
 
     public function testColumnRenameIsSkippedWhenNewColumnAlreadyExists(): void

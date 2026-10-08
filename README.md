@@ -27,8 +27,8 @@ Handles table renames, classname value remapping, column renames and table merge
 `composer.json` is the source of truth. Silverstripe 5 is supported until its end of life in
 April 2027; Silverstripe 4 is not supported.
 
-The SQL the module runs (`RENAME TABLE`, `ALTER TABLE ... CHANGE`, `UPDATE ... JOIN`,
-`SHOW COLUMNS`) is MySQL/MariaDB only.
+The SQL the module runs (`RENAME TABLE`, `ALTER TABLE ... RENAME COLUMN` / `CHANGE`, `UPDATE ... JOIN`,
+`SHOW COLUMNS`, `SHOW CREATE TABLE`) is MySQL/MariaDB only.
 
 ## Installation
 
@@ -107,6 +107,10 @@ All on `Restruct\SilverStripe\Migrations\DatabaseMigrationExtension`, all defaul
 | `table_mappings` | `OldTable: NewTable` | before the schema build |
 | `column_renames` | `Table: { OldColumn: NewColumn }` | before the schema build |
 | `table_merges` | `SourceTable: { target, columns, marker, versioned }` | after the schema build |
+
+A column rename keeps the column's whole definition (type, NULL, default, `AUTO_INCREMENT`,
+`ON UPDATE`, collation, comment): it uses `RENAME COLUMN` on MySQL 8.0+ / MariaDB 10.5.2+, and on
+older servers a `CHANGE` that repeats the definition `SHOW CREATE TABLE` reports for the column.
 
 On DataObjects, uninherited `private static` config:
 

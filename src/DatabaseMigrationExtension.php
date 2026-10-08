@@ -307,21 +307,34 @@ class DatabaseMigrationExtension extends Extension
                     continue;
                 }
 
-                $columnType = $columnInfo['Type'];
-                $nullable = $columnInfo['Null'] === 'YES' ? 'NULL' : 'NOT NULL';
-                $default = $columnInfo['Default'] !== null
-                    ? "DEFAULT " . $conn->quoteString($columnInfo['Default'])
-                    : '';
-
-                $sql = sprintf(
-                    "ALTER TABLE %s CHANGE %s %s %s %s %s",
-                    $conn->escapeIdentifier($tableName),
-                    $conn->escapeIdentifier($oldColumn),
-                    $conn->escapeIdentifier($newColumn),
-                    $columnType,
-                    $nullable,
-                    $default
-                );
+                // $columnType = $columnInfo['Type'];
+                // $nullable = $columnInfo['Null'] === 'YES' ? 'NULL' : 'NOT NULL';
+                // $default = $columnInfo['Default'] !== null
+                //     ? "DEFAULT " . $conn->quoteString($columnInfo['Default'])
+                //     : '';
+                //
+                // $sql = sprintf(
+                //     "ALTER TABLE %s CHANGE %s %s %s %s %s",
+                //     $conn->escapeIdentifier($tableName),
+                //     $conn->escapeIdentifier($oldColumn),
+                //     $conn->escapeIdentifier($newColumn),
+                //     $columnType,
+                //     $nullable,
+                //     $default
+                // );
+                # (#2) The CHANGE above was rebuilt from Type/Null/Default only, so a rename dropped
+                # AUTO_INCREMENT and ON UPDATE (Extra), the column collation and its comment, and
+                # quoted expression defaults (CURRENT_TIMESTAMP became the string 'CURRENT_TIMESTAMP').
+                # RENAME COLUMN changes the name only and leaves the definition alone; servers that
+                # predate it get a CHANGE that repeats the column's own definition verbatim.
+                $sql = $this->getRenameColumnSql($tableName, $columnInfo['Field'], $newColumn);
+                if ($sql === null) {
+                    DB::alteration_message(
+                        "WARNING: Could not read the definition of {$tableName}.{$oldColumn} - column not renamed",
+                        'error'
+                    );
+                    continue;
+                }
 
                 DB::alteration_message("Renaming column: {$tableName}.{$oldColumn} -> {$newColumn}", 'changed');
                 DB::query($sql);
@@ -335,6 +348,101 @@ class DatabaseMigrationExtension extends Extension
                 'changed'
             );
         }
+    }
+
+    /**
+     * The ALTER TABLE statement that renames a column while keeping its whole definition: type,
+     * NULL-ability, default (literal or expression), AUTO_INCREMENT, ON UPDATE, character set,
+     * collation and comment. Null when the column definition cannot be read (fallback path only).
+     */
+    protected function getRenameColumnSql(string $table, string $oldColumn, string $newColumn): ?string
+    {
+        $conn = DB::get_conn();
+
+        if ($this->supportsRenameColumn()) {
+            return sprintf(
+                'ALTER TABLE %s RENAME COLUMN %s TO %s',
+                $conn->escapeIdentifier($table),
+                $conn->escapeIdentifier($oldColumn),
+                $conn->escapeIdentifier($newColumn)
+            );
+        }
+
+        # Older servers only have CHANGE, which takes a full column definition. Take it from SHOW
+        # CREATE TABLE as the server prints it, rather than reassembling it from SHOW COLUMNS: that
+        # is the one source that carries every attribute, with defaults already quoted the way the
+        # server wants them back (a literal quoted, CURRENT_TIMESTAMP and other expressions bare),
+        # which SHOW COLUMNS reports differently on MySQL and MariaDB.
+        $definition = $this->getColumnDefinition($table, $oldColumn);
+        if ($definition === null) {
+            return null;
+        }
+
+        return sprintf(
+            'ALTER TABLE %s CHANGE %s %s %s',
+            $conn->escapeIdentifier($table),
+            $conn->escapeIdentifier($oldColumn),
+            $conn->escapeIdentifier($newColumn),
+            $definition
+        );
+    }
+
+    /**
+     * Whether the server has ALTER TABLE ... RENAME COLUMN: MySQL 8.0 and MariaDB 10.5.2 onwards.
+     */
+    protected function supportsRenameColumn(): bool
+    {
+        # SELECT VERSION() rather than the connector's server_info: through some client libraries
+        # MariaDB's server_info carries a "5.5.5-" replication prefix in front of the real version.
+        $version = (string) DB::query('SELECT VERSION()')->value();
+        if (!preg_match('/^(\d+\.\d+\.\d+)/', $version, $matches)) {
+            # Unknown version string: take the path that works on every MySQL-family server
+            return false;
+        }
+
+        if (stripos($version, 'mariadb') !== false) {
+            return version_compare($matches[1], '10.5.2', '>=');
+        }
+
+        return version_compare($matches[1], '8.0.0', '>=');
+    }
+
+    /**
+     * The column's definition (everything after its name) from SHOW CREATE TABLE, without the
+     * trailing comma - e.g. `int(11) NOT NULL AUTO_INCREMENT`.
+     */
+    protected function getColumnDefinition(string $table, string $column): ?string
+    {
+        $conn = DB::get_conn();
+
+        # MariaDB's ANSI sql_mode (Silverstripe's default) makes SHOW CREATE TABLE print portable SQL
+        # and leave out server-specific column options - AUTO_INCREMENT among them, the very thing
+        # this must keep. So read it under plain ANSI_QUOTES (which the identifier quoting below
+        # still relies on) and put the session's own mode back afterwards, also on failure.
+        $sqlMode = (string) DB::query('SELECT @@SESSION.sql_mode')->value();
+        DB::query("SET SESSION sql_mode = 'ANSI_QUOTES'");
+        try {
+            $row = DB::query('SHOW CREATE TABLE ' . $conn->escapeIdentifier($table))->record();
+        } finally {
+            DB::query('SET SESSION sql_mode = ' . $conn->quoteString($sqlMode));
+        }
+        $createSql = $row ? (string) (array_values($row)[1] ?? '') : '';
+
+        foreach (preg_split('/\R/', $createSql) as $line) {
+            # A column line is "  <quoted name> <definition>,". The quote is " under ANSI_QUOTES
+            # (set above); a backtick is accepted too, in case a server ignores the mode for this
+            # output. A quote inside the name is doubled. Key, index and constraint lines start with
+            # a keyword, not a quote.
+            if (!preg_match('/^\s*(["`])((?:(?!\1).|\1\1)+)\1\s+(.+?),?\s*$/', $line, $matches)) {
+                continue;
+            }
+            $name = str_replace($matches[1] . $matches[1], $matches[1], $matches[2]);
+            if (strcasecmp($name, $column) === 0) {
+                return $matches[3];
+            }
+        }
+
+        return null;
     }
 
     /**

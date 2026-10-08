@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.1 (unreleased)
+
+### Fixed
+
+- **Column renames kept only the type, NULL-ability and default** (#2). `column_renames` rebuilt
+  the column with `ALTER TABLE ... CHANGE` from `SHOW COLUMNS`, which dropped `AUTO_INCREMENT`,
+  `ON UPDATE CURRENT_TIMESTAMP`, the column's collation and its comment, and quoted an expression
+  default into a string (`DEFAULT 'CURRENT_TIMESTAMP'`, which a timestamp column rejects, so the
+  build aborted). Renames now use `ALTER TABLE ... RENAME COLUMN` (MySQL 8.0+, MariaDB 10.5.2+),
+  which leaves the definition alone; older servers get a `CHANGE` that repeats the column
+  definition exactly as `SHOW CREATE TABLE` prints it. Tested on MariaDB 10.4, 11.4 and 12.3 and
+  MySQL 5.7 and 8.0, both paths on each.
+
 ## 0.3.0 (2026-09-25)
 
 Silverstripe 6 support, alongside Silverstripe 5. No breaking changes for Silverstripe 5 projects.
