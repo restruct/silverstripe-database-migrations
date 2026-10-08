@@ -10,8 +10,11 @@
   default into a string (`DEFAULT 'CURRENT_TIMESTAMP'`, which a timestamp column rejects, so the
   build aborted). Renames now use `ALTER TABLE ... RENAME COLUMN` (MySQL 8.0+, MariaDB 10.5.2+),
   which leaves the definition alone; older servers get a `CHANGE` that repeats the column
-  definition exactly as `SHOW CREATE TABLE` prints it. Tested on MariaDB 10.4, 11.4 and 12.3 and
-  MySQL 5.7 and 8.0, both paths on each.
+  definition exactly as `SHOW CREATE TABLE` prints it, with references to the column itself (a
+  column-level `CHECK`, which MariaDB adds to every JSON column) following the rename, run under
+  the same `ANSI_QUOTES` mode it was read in so a project `sql_mode` with `NO_BACKSLASH_ESCAPES`
+  cannot change escaped defaults or comments. Tested on MariaDB 10.4, 11.4 and 12.3 and MySQL 5.7
+  and 8.0, both paths on each.
 - **A second build in the same process skipped every migration and merge** (#4). The run-once
   guards were set by the first `dev/build` / `db:build` and never cleared, so any later build in
   that process (a test run, a long-running worker) did nothing, without a word. They are now

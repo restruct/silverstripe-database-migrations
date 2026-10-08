@@ -340,17 +340,27 @@ class DatabaseMigrationExtension extends Extension
                 # quoted expression defaults (CURRENT_TIMESTAMP became the string 'CURRENT_TIMESTAMP').
                 # RENAME COLUMN changes the name only and leaves the definition alone; servers that
                 # predate it get a CHANGE that repeats the column's own definition verbatim.
-                $sql = $this->getRenameColumnSql($tableName, $columnInfo['Field'], $newColumn);
-                if ($sql === null) {
+                // $sql = $this->getRenameColumnSql($tableName, $columnInfo['Field'], $newColumn);
+                // if ($sql === null) {
+                //     DB::alteration_message(
+                //         "WARNING: Could not read the definition of {$tableName}.{$oldColumn} - column not renamed",
+                //         'error'
+                //     );
+                //     continue;
+                // }
+                //
+                // DB::alteration_message("Renaming column: {$tableName}.{$oldColumn} -> {$newColumn}", 'changed');
+                // DB::query($sql);
+                # The SQL is now built AND run in renameColumn(): the CHANGE fallback has to execute
+                # under the same sql_mode its definition was read in (see there).
+                DB::alteration_message("Renaming column: {$tableName}.{$oldColumn} -> {$newColumn}", 'changed');
+                if (!$this->renameColumn($tableName, $columnInfo['Field'], $newColumn)) {
                     DB::alteration_message(
                         "WARNING: Could not read the definition of {$tableName}.{$oldColumn} - column not renamed",
                         'error'
                     );
                     continue;
                 }
-
-                DB::alteration_message("Renaming column: {$tableName}.{$oldColumn} -> {$newColumn}", 'changed');
-                DB::query($sql);
                 $renamedCount++;
             }
         }
@@ -361,6 +371,38 @@ class DatabaseMigrationExtension extends Extension
                 'changed'
             );
         }
+    }
+
+    /**
+     * Rename one column, keeping its whole definition. False when the definition could not be read
+     * (CHANGE fallback only), in which case nothing was changed.
+     */
+    protected function renameColumn(string $table, string $oldColumn, string $newColumn): bool
+    {
+        if ($this->supportsRenameColumn()) {
+            DB::query($this->getRenameColumnSql($table, $oldColumn, $newColumn));
+            return true;
+        }
+
+        # The CHANGE fallback repeats a definition that SHOW CREATE TABLE printed under plain
+        # ANSI_QUOTES (see getColumnDefinition()), so it must also be PARSED under that mode: with
+        # the project's own sql_mode, NO_BACKSLASH_ESCAPES would read the printed \n, \\ and \' in
+        # defaults, comments and ENUM values as literal backslashes and silently change them. The
+        # session's own mode is restored afterwards, also when the ALTER fails.
+        $conn = DB::get_conn();
+        $sqlMode = (string) DB::query('SELECT @@SESSION.sql_mode')->value();
+        DB::query("SET SESSION sql_mode = 'ANSI_QUOTES'");
+        try {
+            $sql = $this->getRenameColumnSql($table, $oldColumn, $newColumn);
+            if ($sql === null) {
+                return false;
+            }
+            DB::query($sql);
+        } finally {
+            DB::query('SET SESSION sql_mode = ' . $conn->quoteString($sqlMode));
+        }
+
+        return true;
     }
 
     /**
@@ -396,28 +438,123 @@ class DatabaseMigrationExtension extends Extension
             $conn->escapeIdentifier($table),
             $conn->escapeIdentifier($oldColumn),
             $conn->escapeIdentifier($newColumn),
-            $definition
+            # A column-level CHECK names the column itself - MariaDB gives every JSON column
+            # CHECK (json_valid("Col")) - so the copied definition must follow the rename, or the
+            # ALTER fails with "Unknown column ... in 'CHECK'" and aborts dev/build.
+            $this->renameIdentifierInDefinition($definition, $oldColumn, $newColumn)
         );
     }
 
     /**
-     * Whether the server has ALTER TABLE ... RENAME COLUMN: MySQL 8.0 and MariaDB 10.5.2 onwards.
+     * Replace every quoted identifier equal to $oldName (case-insensitive, as MySQL column names
+     * are) in a column definition with $newName. String literals and comments are copied as they
+     * are, so a default or COMMENT that happens to contain the old name is not touched.
+     */
+    protected function renameIdentifierInDefinition(string $definition, string $oldName, string $newName): string
+    {
+        $out = '';
+        $length = strlen($definition);
+        $i = 0;
+        while ($i < $length) {
+            $char = $definition[$i];
+
+            # '...' string literal: \x escapes (printed by SHOW CREATE TABLE) and doubled '' quotes
+            if ($char === "'") {
+                $j = $i + 1;
+                while ($j < $length) {
+                    if ($definition[$j] === '\\') {
+                        $j += 2;
+                        continue;
+                    }
+                    if ($definition[$j] === "'") {
+                        if (($definition[$j + 1] ?? '') === "'") {
+                            $j += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    $j++;
+                }
+                $out .= substr($definition, $i, $j - $i + 1);
+                $i = $j + 1;
+                continue;
+            }
+
+            # /* ... */ comment (including /*! versioned ones): copied unchanged
+            if ($char === '/' && ($definition[$i + 1] ?? '') === '*') {
+                $end = strpos($definition, '*/', $i + 2);
+                $end = $end === false ? $length : $end + 2;
+                $out .= substr($definition, $i, $end - $i);
+                $i = $end;
+                continue;
+            }
+
+            # "..." (ANSI_QUOTES) or `...` identifier; the quote is doubled inside the name
+            if ($char === '"' || $char === '`') {
+                $j = $i + 1;
+                $name = '';
+                while ($j < $length) {
+                    if ($definition[$j] === $char) {
+                        if (($definition[$j + 1] ?? '') === $char) {
+                            $name .= $char;
+                            $j += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    $name .= $definition[$j];
+                    $j++;
+                }
+                $out .= strcasecmp($name, $oldName) === 0
+                    ? $char . str_replace($char, $char . $char, $newName) . $char
+                    : substr($definition, $i, $j - $i + 1);
+                $i = $j + 1;
+                continue;
+            }
+
+            $out .= $char;
+            $i++;
+        }
+
+        return $out;
+    }
+
+    /**
+     * Whether the server has ALTER TABLE ... RENAME COLUMN: MySQL 8.0.3 and MariaDB 10.5.2 onwards.
      */
     protected function supportsRenameColumn(): bool
     {
-        # SELECT VERSION() rather than the connector's server_info: through some client libraries
-        # MariaDB's server_info carries a "5.5.5-" replication prefix in front of the real version.
-        $version = (string) DB::query('SELECT VERSION()')->value();
-        if (!preg_match('/^(\d+\.\d+\.\d+)/', $version, $matches)) {
-            # Unknown version string: take the path that works on every MySQL-family server
+        # SELECT VERSION() rather than the connector's server_info, which through some client
+        # libraries carries MariaDB's "5.5.5-" replication prefix (handled below all the same).
+        return static::versionSupportsRenameColumn((string) DB::query('SELECT VERSION()')->value());
+    }
+
+    /**
+     * Whether a server reporting this VERSION() string has RENAME COLUMN. Unknown strings get false:
+     * the CHANGE fallback works on every MySQL-family server.
+     */
+    protected static function versionSupportsRenameColumn(string $version): bool
+    {
+        $isMariaDb = stripos($version, 'mariadb') !== false;
+        if ($isMariaDb) {
+            # "5.5.5-10.6.12-MariaDB": the 5.5.5 is a compatibility prefix, not the version
+            $version = (string) preg_replace('/^5\.5\.5-/', '', $version);
+        }
+
+        # Major.minor with an optional patch: Aurora can report e.g. "8.0.mysql_aurora.3.04.0"
+        if (!preg_match('/^(\d+)\.(\d+)(?:\.(\d+))?/', $version, $matches)) {
             return false;
         }
+        $number = sprintf('%d.%d.%d', $matches[1], $matches[2], $matches[3] ?? 0);
 
-        if (stripos($version, 'mariadb') !== false) {
-            return version_compare($matches[1], '10.5.2', '>=');
+        if ($isMariaDb) {
+            return version_compare($number, '10.5.2', '>=');
         }
 
-        return version_compare($matches[1], '8.0.0', '>=');
+        # MySQL added RENAME COLUMN in 8.0.3 (bugs.mysql.com #32497, "fixed in 8.0.3"); 8.0.0-8.0.2
+        # were development milestones. Percona Server and Aurora MySQL report MySQL's numbering.
+        // return version_compare($matches[1], '8.0.0', '>=');
+        return version_compare($number, '8.0.3', '>=');
     }
 
     /**

@@ -350,6 +350,170 @@ class DatabaseMigrationExtensionTest extends SapphireTest
         $this->assertRenameKeepsCollationCommentAndDefault(true);
     }
 
+    protected function isMariaDb(): bool
+    {
+        return stripos((string) DB::query('SELECT VERSION()')->value(), 'mariadb') !== false;
+    }
+
+    protected function sqlMode(): string
+    {
+        return (string) DB::query('SELECT @@SESSION.sql_mode')->value();
+    }
+
+    /**
+     * Regression (verifier F1 on #2): the CHANGE fallback copied a column-level CHECK that names
+     * the column itself, so the ALTER failed with "Unknown column ... in 'CHECK'" and aborted
+     * dev/build. MariaDB only: MySQL turns a column CHECK into a table constraint (8.0.16+) or
+     * ignores it (5.7).
+     */
+    public function testColumnRenameKeepsColumnCheckViaChange(): void
+    {
+        if (!$this->isMariaDb()) {
+            $this->markTestSkipped('column-level CHECK in the column definition is MariaDB behaviour');
+        }
+        $this->createRawTable('DbmCheck', '"ID" int, "Score" int DEFAULT NULL CHECK ("Score" > 0)');
+
+        $this->renameColumn('DbmCheck', 'Score', 'Points', true);
+
+        $this->assertNull($this->fullColumn('DbmCheck', 'Score'));
+        $this->assertNotNull($this->fullColumn('DbmCheck', 'Points'));
+        DB::query('INSERT INTO "DbmCheck" ("ID", "Points") VALUES (1, 5)');
+        // The constraint came along and now checks the renamed column
+        $this->expectException(\Throwable::class);
+        DB::query('INSERT INTO "DbmCheck" ("ID", "Points") VALUES (2, -1)');
+    }
+
+    /**
+     * Same as above for MariaDB's JSON type, which is longtext with CHECK (json_valid("<col>")):
+     * every JSON column hit the CHECK failure.
+     */
+    public function testColumnRenameKeepsMariaDbJsonCheckViaChange(): void
+    {
+        if (!$this->isMariaDb()) {
+            $this->markTestSkipped('JSON as longtext + CHECK (json_valid()) is MariaDB behaviour');
+        }
+        $this->createRawTable('DbmJson', '"ID" int, "J" json DEFAULT NULL');
+
+        $this->renameColumn('DbmJson', 'J', 'J2', true);
+
+        $this->assertNotNull($this->fullColumn('DbmJson', 'J2'));
+        DB::query('INSERT INTO "DbmJson" ("ID", "J2") VALUES (1, \'{"a":1}\')');
+        $this->expectException(\Throwable::class);
+        DB::query('INSERT INTO "DbmJson" ("ID", "J2") VALUES (2, \'not json\')');
+    }
+
+    /**
+     * The old name inside a string literal (default, comment) is data, not a column reference,
+     * and must not be rewritten along with the column.
+     */
+    public function testColumnRenameLeavesOldNameInLiteralsAloneViaChange(): void
+    {
+        $this->createRawTable('DbmLit', '"ID" int, "Old" varchar(30) NOT NULL DEFAULT \'Old "Old" `Old`\' COMMENT \'"Old" stays\'');
+
+        $this->renameColumn('DbmLit', 'Old', 'New', true);
+
+        $col = $this->fullColumn('DbmLit', 'New');
+        $this->assertNotNull($col);
+        $this->assertSame('"Old" stays', $col['Comment']);
+        DB::query('INSERT INTO "DbmLit" ("ID") VALUES (1)');
+        $this->assertSame(['Old "Old" `Old`'], $this->column('DbmLit', 'New'));
+    }
+
+    /**
+     * Regression (verifier F3): a column whose name starts with the renamed one, listed before
+     * it, must not be taken for it.
+     */
+    public function testColumnRenamePicksTheExactColumnNotAPrefixMatchViaChange(): void
+    {
+        $this->createRawTable('DbmPrefix', '"ID" int, "TitleOld" varchar(10) DEFAULT \'old\', "Title" varchar(20) NOT NULL DEFAULT \'t\'');
+
+        $this->renameColumn('DbmPrefix', 'Title', 'Heading', true);
+
+        $heading = $this->fullColumn('DbmPrefix', 'Heading');
+        $this->assertNotNull($heading);
+        $this->assertSame('varchar(20)', $heading['Type']);
+        $this->assertSame('NO', $heading['Null']);
+        $titleOld = $this->fullColumn('DbmPrefix', 'TitleOld');
+        $this->assertNotNull($titleOld);
+        $this->assertSame('varchar(10)', $titleOld['Type']);
+        $this->assertSame('YES', $titleOld['Null']);
+    }
+
+    /**
+     * Regression (verifier F2): the definition is printed under ANSI_QUOTES, with backslash
+     * escapes; parsed back under a project sql_mode with NO_BACKSLASH_ESCAPES, a default with a
+     * backslash or newline changed. The session's own mode must be back afterwards.
+     */
+    public function testColumnRenameUnderNoBackslashEscapesKeepsDefaultAndRestoresModeViaChange(): void
+    {
+        // Created under the default (backslash-escaping) mode: default is a, backslash, b, newline, c
+        $this->createRawTable('DbmNbe', '"ID" int, "D" varchar(20) NOT NULL DEFAULT \'a\\\\b\\nc\'');
+        DB::query('INSERT INTO "DbmNbe" ("ID") VALUES (1)');
+        $expected = (string) DB::query('SELECT HEX("D") FROM "DbmNbe"')->value();
+        $this->assertSame(bin2hex("a\\b\nc"), strtolower($expected), 'fixture default');
+
+        $originalMode = $this->sqlMode();
+        DB::query("SET SESSION sql_mode = 'ANSI,NO_BACKSLASH_ESCAPES'");
+        $projectMode = $this->sqlMode();
+        try {
+            $this->renameColumn('DbmNbe', 'D', 'D2', true);
+            $this->assertSame($projectMode, $this->sqlMode(), 'sql_mode not restored after the rename');
+        } finally {
+            DB::query('SET SESSION sql_mode = ' . DB::get_conn()->quoteString($originalMode));
+        }
+
+        DB::query('INSERT INTO "DbmNbe" ("ID") VALUES (2)');
+        $this->assertSame($expected, (string) DB::query('SELECT HEX("D2") FROM "DbmNbe" WHERE "ID" = 2')->value());
+    }
+
+    public function testColumnRenameRestoresSessionSqlModeViaChange(): void
+    {
+        $this->createRawTable('DbmMode', '"ID" int, "Old" int');
+        $before = $this->sqlMode();
+
+        $this->renameColumn('DbmMode', 'Old', 'New', true);
+
+        $this->assertNotNull($this->fullColumn('DbmMode', 'New'));
+        $this->assertSame($before, $this->sqlMode());
+    }
+
+    /**
+     * Which VERSION() strings get RENAME COLUMN (MySQL 8.0.3+, MariaDB 10.5.2+) and which get the
+     * CHANGE fallback.
+     */
+    public function testRenameColumnSupportByVersionString(): void
+    {
+        $method = new \ReflectionMethod(DatabaseMigrationExtension::class, 'versionSupportsRenameColumn');
+        $method->setAccessible(true);
+        $cases = [
+            '10.5.1-MariaDB' => false,
+            '10.5.2-MariaDB' => true,
+            '10.4.34-MariaDB-1:10.4.34+maria~ubu2004' => false,
+            '10.11.6-MariaDB-0ubuntu0.24.04.1' => true,
+            '5.5.5-10.6.12-MariaDB' => true,
+            '5.5.5-10.4.34-MariaDB' => false,
+            '11.4.13-MariaDB-ubu2404' => true,
+            '12.3.2-MariaDB' => true,
+            '5.7.44' => false,
+            '5.7.44-48-log' => false,
+            '8.0.0-dmr' => false,
+            '8.0.2' => false,
+            '8.0.3-rc' => true,
+            '8.0.36-0ubuntu0.22.04.1' => true,
+            '8.0.35-27' => true,
+            '5.7.12' => false,
+            '5.7.mysql_aurora.2.11.2' => false,
+            '8.0.23' => true,
+            '8.0.mysql_aurora.3.04.0' => false,
+            '8.4.3' => true,
+            '9.1.0' => true,
+            'garbage' => false,
+        ];
+        foreach ($cases as $version => $expected) {
+            $this->assertSame($expected, $method->invoke(null, $version), $version);
+        }
+    }
+
     public function testColumnRenameIsSkippedWhenNewColumnAlreadyExists(): void
     {
         Config::modify()->set(DatabaseMigrationExtension::class, 'column_renames', [
