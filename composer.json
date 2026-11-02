@@ -1,6 +1,15 @@
 {
     "name": "restruct/silverstripe-database-migrations",
-    "description": "Database migration utilities for SilverStripe: table renames, classname remapping, column renames, and table merges during dev/build",
+    "description": "Rename DataObject classes, tables and columns without losing data: dev/build remaps ClassName values, renames tables and columns, and merges retired tables into their replacements",
+    "keywords": [
+        "silverstripe",
+        "silverstripe-module",
+        "database",
+        "migration",
+        "schema",
+        "dev-build",
+        "classname-remapping"
+    ],
     "type": "silverstripe-vendormodule",
     "license": "MIT",
     "authors": [
