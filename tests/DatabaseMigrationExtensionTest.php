@@ -2,6 +2,7 @@
 
 namespace Restruct\SilverStripe\Migrations\Tests;
 
+use InvalidArgumentException;
 use Restruct\SilverStripe\Migrations\DatabaseMigrationExtension;
 use Restruct\SilverStripe\Migrations\Tests\Stub\ChangeOnlyMigrationExtension;
 use Restruct\SilverStripe\Migrations\Tests\Stub\MigratedThing;
@@ -613,6 +614,68 @@ class DatabaseMigrationExtensionTest extends SapphireTest
     {
         $this->assertNull(Config::inst()->get(DatabaseMigrationExtension::class, 'migrations_run'));
         $this->assertNull(Config::inst()->get(DatabaseMigrationExtension::class, 'merges_run'));
+    }
+
+    /**
+     * (#3) table_merge_mode defaults to fill_empty, so a merge never overwrites data unless asked
+     */
+    public function testTableMergeModeDefaultsToFillEmpty(): void
+    {
+        $this->assertSame('fill_empty', Config::inst()->get(DatabaseMigrationExtension::class, 'table_merge_mode'));
+    }
+
+    /**
+     * (#3) table_merge_mode is the default for every merge without its own merge_mode, and a
+     * per-merge merge_mode overrides it. Partial overlaps, so 0.3 would have merged neither.
+     */
+    public function testTableMergeModeConfigIsTheDefaultAndPerMergeModeOverridesIt(): void
+    {
+        Config::modify()->set(DatabaseMigrationExtension::class, 'table_merge_mode', 'overwrite');
+        Config::modify()->set(DatabaseMigrationExtension::class, 'table_merges', [
+            'DbmMergeSrc' => ['target' => 'DbmMergeDst'],
+            'DbmMergeSrc2' => ['target' => 'DbmMergeDst2', 'merge_mode' => 'fill_empty'],
+        ]);
+        foreach (['DbmMergeSrc', 'DbmMergeDst', 'DbmMergeSrc2', 'DbmMergeDst2'] as $table) {
+            $this->createRawTable($table, '"ID" int, "Title" varchar(50), "Extra" varchar(50)');
+        }
+        foreach (['DbmMergeSrc', 'DbmMergeSrc2'] as $table) {
+            DB::query("INSERT INTO \"{$table}\" VALUES (1, 'src1', 'e1'), (2, 'src2', 'e2')");
+        }
+        foreach (['DbmMergeDst', 'DbmMergeDst2'] as $table) {
+            DB::query("INSERT INTO \"{$table}\" VALUES (1, 'dst1', NULL)");
+        }
+
+        $this->fireHook('onAfterBuild');
+
+        // Global overwrite
+        $this->assertSame(['src1', 'src2'], $this->column('DbmMergeDst', 'Title'));
+        $this->assertSame(['e1', 'e2'], $this->column('DbmMergeDst', 'Extra'));
+        // Per-merge fill_empty wins over the global overwrite
+        $this->assertSame(['dst1', 'src2'], $this->column('DbmMergeDst2', 'Title'));
+        $this->assertSame(['e1', 'e2'], $this->column('DbmMergeDst2', 'Extra'));
+    }
+
+    /**
+     * (#3) An unknown table_merge_mode aborts the build instead of being ignored
+     */
+    public function testUnknownTableMergeModeConfigAbortsTheBuild(): void
+    {
+        Config::modify()->set(DatabaseMigrationExtension::class, 'table_merge_mode', 'merge');
+        Config::modify()->set(DatabaseMigrationExtension::class, 'table_merges', [
+            'DbmMergeSrc' => ['target' => 'DbmMergeDst'],
+        ]);
+        $this->createRawTable('DbmMergeSrc', '"ID" int, "Title" varchar(50)');
+        $this->createRawTable('DbmMergeDst', '"ID" int, "Title" varchar(50)');
+        DB::query('INSERT INTO "DbmMergeSrc" ("ID", "Title") VALUES (1, \'moved\')');
+
+        try {
+            $this->fireHook('onAfterBuild');
+            $this->fail('an unknown table_merge_mode was accepted');
+        } catch (InvalidArgumentException $e) {
+            $this->assertStringContainsString("table_merge_mode is 'merge'", $e->getMessage());
+        }
+        $this->assertSame(0, $this->rowCount('DbmMergeDst'));
+        $this->assertTrue($this->tableExists('DbmMergeSrc'));
     }
 
     protected function columnsLike(string $table, string $column): array

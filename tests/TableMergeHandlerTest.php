@@ -2,6 +2,7 @@
 
 namespace Restruct\SilverStripe\Migrations\Tests;
 
+use InvalidArgumentException;
 use Restruct\SilverStripe\Migrations\TableMergeHandler;
 use Restruct\SilverStripe\Migrations\Tests\Stub\MigratedThing;
 use SilverStripe\Dev\SapphireTest;
@@ -268,5 +269,134 @@ class TableMergeHandlerTest extends SapphireTest
 
         $this->assertTrue($this->tableExists('_obsolete_DbmBanner_2'));
         $this->assertFalse($this->tableExists('DbmBanner'));
+    }
+
+    /**
+     * (#3) Without a merge_mode the merge is fill_empty: on a same-ID row only the NULL and ''
+     * target columns take the source value. An int 0 is a value and is kept - MySQL would compare
+     * it equal to '' without the CAST in updateExistingRecords().
+     */
+    public function testDefaultMergeModeFillsOnlyEmptyColumnsOfSameIdRows(): void
+    {
+        $this->createRawTable('DbmBanner', '"ID" int, "Title" varchar(50), "Extra" varchar(50), "Note" varchar(50), "Num" int');
+        $this->createRawTable('DbmHero', '"ID" int, "Title" varchar(50), "Extra" varchar(50), "Note" varchar(50), "Num" int');
+        DB::query('INSERT INTO "DbmBanner" VALUES (1, \'src1\', \'e1\', \'n1\', 5)');
+        DB::query('INSERT INTO "DbmHero" VALUES (1, \'dst1\', NULL, \'\', 0)');
+
+        TableMergeHandler::create()->runTableMerges(['DbmBanner' => ['target' => 'DbmHero']]);
+
+        $this->assertSame(1, $this->rowCount('DbmHero'));
+        $this->assertSame(['dst1'], $this->column('DbmHero', 'Title'), 'a non-empty target value was overwritten');
+        $this->assertSame(['e1'], $this->column('DbmHero', 'Extra'), 'a NULL target value was not filled');
+        $this->assertSame(['n1'], $this->column('DbmHero', 'Note'), 'an empty-string target value was not filled');
+        $this->assertSame(['0'], array_map('strval', $this->column('DbmHero', 'Num')), 'an int 0 was treated as empty');
+    }
+
+    /**
+     * (#3) fill_empty on a PARTIAL overlap: the same-ID row is filled even though other rows are
+     * inserted in the same merge (0.3 only touched same-ID rows when nothing was inserted).
+     */
+    public function testFillEmptyMergesSameIdRowsOnPartialOverlap(): void
+    {
+        $this->createRawTable('DbmBanner', '"ID" int, "Title" varchar(50), "Extra" varchar(50)');
+        $this->createRawTable('DbmHero', '"ID" int, "Title" varchar(50), "Extra" varchar(50)');
+        DB::query('INSERT INTO "DbmBanner" VALUES (1, \'src1\', \'e1\'), (2, \'src2\', \'e2\')');
+        DB::query('INSERT INTO "DbmHero" VALUES (1, \'dst1\', NULL)');
+
+        TableMergeHandler::create()->runTableMerges([
+            'DbmBanner' => ['target' => 'DbmHero', 'merge_mode' => TableMergeHandler::MERGE_MODE_FILL_EMPTY],
+        ]);
+
+        $this->assertSame(['dst1', 'src2'], $this->column('DbmHero', 'Title'));
+        $this->assertSame(['e1', 'e2'], $this->column('DbmHero', 'Extra'));
+    }
+
+    /**
+     * (#3) overwrite on a PARTIAL overlap: the same-ID row takes every paired source value, a NULL
+     * included, while the new row is inserted; a target-only column is left alone.
+     */
+    public function testOverwriteReplacesSameIdRowsOnPartialOverlap(): void
+    {
+        $this->createRawTable('DbmBanner', '"ID" int, "Title" varchar(50), "Extra" varchar(50)');
+        $this->createRawTable('DbmHero', '"ID" int, "Title" varchar(50), "Extra" varchar(50), "HeroOnly" varchar(50)');
+        DB::query('INSERT INTO "DbmBanner" VALUES (1, \'src1\', NULL), (2, \'src2\', \'e2\')');
+        DB::query('INSERT INTO "DbmHero" VALUES (1, \'dst1\', \'old\', \'keep\')');
+
+        TableMergeHandler::create()->runTableMerges([
+            'DbmBanner' => ['target' => 'DbmHero', 'merge_mode' => TableMergeHandler::MERGE_MODE_OVERWRITE],
+        ]);
+
+        $this->assertSame(['src1', 'src2'], $this->column('DbmHero', 'Title'));
+        $this->assertSame([null, 'e2'], $this->column('DbmHero', 'Extra'));
+        $this->assertSame(['keep', null], $this->column('DbmHero', 'HeroOnly'));
+    }
+
+    /**
+     * (#3) The merge_mode applies to the _Live table as well, and to a mapped column: the mapped
+     * HeroImageID of 0 is a value and is kept in fill_empty mode, the empty Title is filled.
+     */
+    public function testFillEmptyAppliesToLiveTableAndMappedColumns(): void
+    {
+        $this->createBlockTables();
+        $this->createBlockTables('_Live');
+        DB::query('INSERT INTO "DbmBanner" VALUES (1, \'b1\', 11), (2, \'b2\', 12)');
+        DB::query('INSERT INTO "DbmBanner_Live" VALUES (1, \'b1 live\', 11)');
+        DB::query('INSERT INTO "DbmHero" VALUES (1, \'\', 0)');
+        DB::query('INSERT INTO "DbmHero_Live" VALUES (1, NULL, 0)');
+
+        TableMergeHandler::create()->runTableMerges([
+            'DbmBanner' => [
+                'target' => 'DbmHero',
+                'columns' => ['BannerImageID' => 'HeroImageID'],
+                'versioned' => true,
+            ],
+        ]);
+
+        $this->assertSame(['b1', 'b2'], $this->column('DbmHero', 'Title'));
+        $this->assertSame(['0', '12'], array_map('strval', $this->column('DbmHero', 'HeroImageID')));
+        $this->assertSame(['b1 live'], $this->column('DbmHero_Live', 'Title'));
+        $this->assertSame(['0'], array_map('strval', $this->column('DbmHero_Live', 'HeroImageID')));
+    }
+
+    /**
+     * (#3) An unknown merge_mode is an error, raised before ANY merge runs: the valid first
+     * definition must not be merged either, or a typo leaves the build half done.
+     */
+    public function testUnknownMergeModeThrowsBeforeAnyTableIsTouched(): void
+    {
+        $this->createBlockTables();
+        DB::query('INSERT INTO "DbmBanner" VALUES (1, \'b1\', 11)');
+
+        try {
+            TableMergeHandler::create()->runTableMerges([
+                'DbmBanner' => ['target' => 'DbmHero'],
+                'DbmOther' => ['target' => 'DbmHero', 'merge_mode' => 'replace'],
+            ]);
+            $this->fail('an unknown merge_mode was accepted');
+        } catch (InvalidArgumentException $e) {
+            $this->assertSame(
+                "TableMerge: table_merges.DbmOther.merge_mode is 'replace', must be one of: fill_empty, overwrite",
+                $e->getMessage()
+            );
+        }
+
+        $this->assertTrue($this->tableExists('DbmBanner'), 'the valid merge ran before the error');
+        $this->assertSame(0, $this->rowCount('DbmHero'));
+    }
+
+    /**
+     * (#3) The same check for the default mode passed in (from DatabaseMigrationExtension.table_merge_mode)
+     */
+    public function testUnknownDefaultMergeModeThrows(): void
+    {
+        $this->createBlockTables();
+        DB::query('INSERT INTO "DbmBanner" VALUES (1, \'b1\', 11)');
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            "TableMerge: DatabaseMigrationExtension.table_merge_mode is 'fill-empty', must be one of: fill_empty, overwrite"
+        );
+
+        TableMergeHandler::create()->runTableMerges(['DbmBanner' => ['target' => 'DbmHero']], 'fill-empty');
     }
 }
