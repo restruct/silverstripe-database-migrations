@@ -384,8 +384,13 @@ class TableMergeHandlerTest extends SapphireTest
             ]);
             $this->fail('an unknown merge_mode was accepted');
         } catch (InvalidArgumentException $e) {
+            # (#3) The list of valid modes gained skip on purpose (2026-11-09, mic)
+            // $this->assertSame(
+            //     "TableMerge: table_merges.DbmOther.merge_mode is 'replace', must be one of: fill_empty, overwrite",
+            //     $e->getMessage()
+            // );
             $this->assertSame(
-                "TableMerge: table_merges.DbmOther.merge_mode is 'replace', must be one of: fill_empty, overwrite",
+                "TableMerge: table_merges.DbmOther.merge_mode is 'replace', must be one of: fill_empty, overwrite, skip",
                 $e->getMessage()
             );
         }
