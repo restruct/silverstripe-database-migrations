@@ -73,6 +73,10 @@ Restruct\SilverStripe\Migrations\DatabaseMigrationExtension:
     MyTable:
       old_column_name: new_column_name
 
+  # Table merges: what a merge does with a source row whose ID is already in the target
+  # (fill_empty, overwrite or skip, see "Same-ID rows: merge_mode" below). Default: fill_empty
+  table_merge_mode: fill_empty
+
   # Table merges: merge deprecated tables into their replacements
   table_merges:
     OldBlockType:
@@ -84,18 +88,21 @@ Restruct\SilverStripe\Migrations\DatabaseMigrationExtension:
         column: Style                  # Column name
         value: 'old-style'             # Value to set
       versioned: true                  # Auto-handle _Live and _Versions tables
+      merge_mode: overwrite            # Overrides table_merge_mode for this merge (optional)
 ```
 
 ### Config options
 
-All on `Restruct\SilverStripe\Migrations\DatabaseMigrationExtension`, all default to `[]`:
+All on `Restruct\SilverStripe\Migrations\DatabaseMigrationExtension`, all default to `[]` except
+`table_merge_mode`:
 
 | Option | Format | Runs |
 | ------ | ------ | ---- |
 | `classname_mappings` | `'Old\Class': 'New\Class'` | registered before the schema build, applied in the populate phase |
 | `table_mappings` | `OldTable: NewTable` | before the schema build |
 | `column_renames` | `Table: { OldColumn: NewColumn }` | before the schema build |
-| `table_merges` | `SourceTable: { target, columns, marker, versioned }` | after the schema build |
+| `table_merges` | `SourceTable: { target, columns, marker, versioned, merge_mode }` | after the schema build |
+| `table_merge_mode` | `fill_empty` (default), `overwrite` or `skip` | default `merge_mode` for `table_merges` entries without one |
 
 A column rename keeps the column's whole definition (type, NULL, default, `AUTO_INCREMENT`,
 `ON UPDATE`, collation, comment): it uses `RENAME COLUMN` on MySQL 8.0+ / MariaDB 10.5.2+, and on
@@ -227,21 +234,42 @@ Restruct\SilverStripe\Migrations\DatabaseMigrationExtension:
 
 3. **onAfterBuild** (after schema):
    - Table merge:
+     - Merges the `BlockBanner` rows whose ID already exists in `BlockHero` into those rows,
+       according to `merge_mode` (see below)
      - Inserts `BlockBanner` records that don't exist in `BlockHero`
-     - If no rows needed inserting (every source ID already exists in the target), copies the
-       mapped and same-named columns from source onto the target rows with the same ID. This
-       overwrites the target values, it does not only fill empty ones. It only happens when there
-       is more than one column pair (`ID` counts as one), so a merge whose only shared column is
-       `ID` updates nothing.
-     - Partial overlap: if some source rows are new and others already exist in the target by ID,
-       the new rows are inserted and the existing target rows are NOT updated at all. The build
-       prints an error-type message naming both tables and the number of rows skipped, e.g.
-       `! TableMerge: BlockBanner -> BlockHero: 3 source row(s) already exist in BlockHero by ID and were NOT updated (existing rows are only updated when a merge inserts nothing)`.
-       The same rules apply to the `_Live` table; `_Versions` rows are only ever inserted (matched
-       on `RecordID` + `Version`).
+     - Both happen on every merge, also when only some of the source rows already exist in the
+       target. The same rules apply to the `_Live` table; `_Versions` rows are only ever inserted
+       (matched on `RecordID` + `Version`).
      - Sets `Element.Style = 'banner-style'` on migrated records
      - Handles `_Live` and `_Versions` tables if `versioned: true`
      - Moves `BlockBanner` tables to `_obsolete_BlockBanner` (with counter suffix if already exists)
+
+### Same-ID rows: `merge_mode`
+
+A source row whose ID is already in the target is merged into that row, unless the mode is
+`skip`. Only the column pairs take part: the mapped columns (`columns`) and the columns with the
+same name in both tables. Target columns the source does not have are never touched.
+
+| `merge_mode` | Same-ID target row |
+| ------------ | ------------------ |
+| `fill_empty` (default) | a column that is `NULL` or an empty string takes the source value, and so does a `has_one` ID column that is `0`; every other value is kept, so the merge never overwrites data |
+| `overwrite` | every paired column takes the source value, `NULL` included |
+| `skip` | left untouched: only the source rows that are missing from the target are inserted |
+
+In `fill_empty`, a `has_one` ID column of `0` counts as empty, as `0` is how Silverstripe stores
+"no relation", so an unset `has_one` is filled from the source. Which columns are `has_one` IDs is
+read from the DataObject schema when the target table belongs to a DataObject class (so an `Int`
+field that merely ends in `ID` is not one); when no class owns the target table, every column
+whose name ends in `ID` counts. In all other columns `0`, `'0'` and a zero date are values, not
+empty, and are kept. Use `overwrite` when the source should win.
+
+Set the mode for one merge with `merge_mode` in its `table_merges` entry, or for every merge
+without its own with `table_merge_mode`. Any other value stops `dev/build` with an
+`InvalidArgumentException` naming the setting, before any table is merged.
+
+The build reports the same-ID rows, e.g.
+`TableMerge: BlockBanner -> BlockHero: 3 source row(s) already exist in BlockHero by ID, merged with merge_mode fill_empty`
+(in `skip` mode the message ends in `left untouched (merge_mode skip)` instead).
 
 **Marker field:** The `marker` config is useful for:
 - Distinguishing migrated records from original ones

@@ -55,6 +55,18 @@ class DatabaseMigrationExtension extends Extension
      */
     private static array $table_merges = [];
 
+    /**
+     * Default merge_mode for table_merges entries that do not set their own: what happens to a
+     * source row whose ID already exists in the target.
+     * - fill_empty: only NULL or empty-string target columns take the source value (never
+     *   overwrites data)
+     * - overwrite: the target row's columns are replaced by the source values
+     * Any other value aborts the build with an InvalidArgumentException.
+     * @config
+     * @see TableMergeHandler::MERGE_MODES
+     */
+    private static string $table_merge_mode = TableMergeHandler::MERGE_MODE_FILL_EMPTY;
+
     // private static bool $migrations_run = false;
     // private static bool $merges_run = false;
     # (#4) Run-state, not config: as private statics on a Configurable class they were also read
@@ -112,7 +124,8 @@ class DatabaseMigrationExtension extends Extension
 
         /** @var TableMergeHandler $handler */
         $handler = Injector::inst()->get(TableMergeHandler::class);
-        $handler->runTableMerges($tableMerges);
+        # Passed as configured, not cast: runTableMerges() rejects anything that is not a known mode
+        $handler->runTableMerges($tableMerges, static::config()->get('table_merge_mode'));
     }
 
     /**

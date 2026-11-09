@@ -2,8 +2,10 @@
 
 namespace Restruct\SilverStripe\Migrations;
 
+use InvalidArgumentException;
 use SilverStripe\Core\Config\Configurable;
 use SilverStripe\Core\Injector\Injectable;
+use SilverStripe\ORM\DataObject;
 use SilverStripe\ORM\DB;
 
 /**
@@ -26,7 +28,18 @@ use SilverStripe\ORM\DB;
  *         column: Style                     # Column name
  *         value: hero-banner                # Value to set
  *       versioned: true                     # Auto-handle _Live and _Versions tables
+ *       merge_mode: fill_empty              # Same-ID rows: fill_empty (default), overwrite or skip (optional)
  * ```
+ *
+ * merge_mode decides what happens to a source row whose ID already exists in the target:
+ * - fill_empty (default): only target columns that are NULL or an empty string get the source
+ *   value, and a has_one ID column that is 0 (an unset relation); every other target value is
+ *   kept. A merge in this mode never overwrites data.
+ * - overwrite: the target row's columns are replaced by the source values.
+ * - skip: the target row is left untouched; the source row is not merged.
+ * Source rows whose ID is not in the target are inserted in every mode.
+ * (was: "Source rows whose ID is not in the target are inserted in both modes.") The default for merges
+ * without their own merge_mode is DatabaseMigrationExtension.table_merge_mode.
  *
  * Security note:
  * - Table/column names use escapeIdentifier() (identifiers can't be parameterized)
@@ -37,6 +50,31 @@ class TableMergeHandler
 {
     use Injectable;
     use Configurable;
+
+    /**
+     * Same-ID target rows: only NULL or empty-string columns take the source value, and has_one
+     * ID columns that are 0 (an unset relation)
+     */
+    public const MERGE_MODE_FILL_EMPTY = 'fill_empty';
+
+    /**
+     * Same-ID target rows: columns are replaced by the source values
+     */
+    public const MERGE_MODE_OVERWRITE = 'overwrite';
+
+    /**
+     * Same-ID target rows: left untouched, only the missing rows are inserted
+     */
+    public const MERGE_MODE_SKIP = 'skip';
+
+    /**
+     * Every accepted merge_mode value
+     */
+    public const MERGE_MODES = [
+        self::MERGE_MODE_FILL_EMPTY,
+        self::MERGE_MODE_OVERWRITE,
+        self::MERGE_MODE_SKIP,
+    ];
 
     /**
      * Get the database schema helper
@@ -61,13 +99,27 @@ class TableMergeHandler
     /**
      * Process all configured table merges
      *
-     * @param array<string, array{target: string, columns?: array, marker?: array, versioned?: bool}> $tableMerges
+     * @param array<string, array{target: string, columns?: array, marker?: array, versioned?: bool, merge_mode?: string}> $tableMerges
+     * @param string $defaultMergeMode merge_mode for definitions that do not set their own. Untyped
+     *                                 on purpose: it comes straight from YAML, and a null or a
+     *                                 number must get the same named error as a typo, not a TypeError.
      * @return int Number of tables successfully merged
+     * @throws InvalidArgumentException when the default or any definition's merge_mode is not one of MERGE_MODES
      */
-    public function runTableMerges(array $tableMerges): int
+    public function runTableMerges(array $tableMerges, $defaultMergeMode = self::MERGE_MODE_FILL_EMPTY): int
     {
         if (empty($tableMerges)) {
             return 0;
+        }
+
+        # Validate every mode BEFORE any table is touched: a typo in the third definition must not
+        # leave the first two merged and the build half done. Throwing aborts dev/build, which is
+        # the point - a mode that is silently ignored would write the wrong data.
+        $this->assertValidMergeMode($defaultMergeMode, 'DatabaseMigrationExtension.table_merge_mode');
+        foreach ($tableMerges as $sourceTable => $config) {
+            if (is_array($config) && array_key_exists('merge_mode', $config)) {
+                $this->assertValidMergeMode($config['merge_mode'], "table_merges.{$sourceTable}.merge_mode");
+            }
         }
 
         $totalMerged = 0;
@@ -78,6 +130,9 @@ class TableMergeHandler
                 DB::alteration_message("TableMerge: Missing 'target' for {$sourceTable}", 'error');
                 continue;
             }
+
+            # Definitions without their own merge_mode take the default
+            $config['merge_mode'] = $config['merge_mode'] ?? $defaultMergeMode;
 
             $merged = $this->mergeTable($sourceTable, $targetTable, $config);
             $totalMerged += $merged;
@@ -94,11 +149,32 @@ class TableMergeHandler
     }
 
     /**
+     * Throw unless $mode is one of MERGE_MODES
+     *
+     * @param mixed $mode The configured value (from YAML, so not necessarily a string)
+     * @param string $where Config path named in the error, so the operator can find the typo
+     * @throws InvalidArgumentException
+     */
+    protected function assertValidMergeMode($mode, string $where): void
+    {
+        if (is_string($mode) && in_array($mode, self::MERGE_MODES, true)) {
+            return;
+        }
+
+        throw new InvalidArgumentException(sprintf(
+            'TableMerge: %s is %s, must be one of: %s',
+            $where,
+            var_export($mode, true),
+            implode(', ', self::MERGE_MODES)
+        ));
+    }
+
+    /**
      * Merge a single source table into a target table
      *
      * @param string $sourceTable Source table name (will be moved to _obsolete_*)
      * @param string $targetTable Target table name to merge into
-     * @param array{columns?: array, marker?: array, versioned?: bool} $config Merge configuration
+     * @param array{columns?: array, marker?: array, versioned?: bool, merge_mode?: string} $config Merge configuration
      * @return int 1 if merged successfully, 0 if skipped
      */
     protected function mergeTable(string $sourceTable, string $targetTable, array $config): int
@@ -119,6 +195,9 @@ class TableMergeHandler
         $columnMapping = $config['columns'] ?? [];
         $marker = $config['marker'] ?? null;
         $versioned = $config['versioned'] ?? false;
+        # runTableMerges() has validated and defaulted this; the fallback only covers a subclass
+        # calling mergeTable() directly
+        $mergeMode = $config['merge_mode'] ?? self::MERGE_MODE_FILL_EMPTY;
 
         // Count records to migrate
         $conn = $this->getConn();
@@ -139,11 +218,12 @@ class TableMergeHandler
         DB::alteration_message("TableMerge: Migrating {$count} record(s) from '{$sourceTable}' to '{$targetTable}'", 'changed');
 
         // Migrate main table
-        $this->migrateTableData($sourceTable, $targetTable, $columnMapping);
+        $this->migrateTableData($sourceTable, $targetTable, $columnMapping, $mergeMode);
 
         // Migrate versioned tables if configured
         if ($versioned) {
-            $this->migrateTableData($sourceTable . '_Live', $targetTable . '_Live', $columnMapping);
+            # _Live rows are matched on ID like the draft table, so the same merge_mode applies
+            $this->migrateTableData($sourceTable . '_Live', $targetTable . '_Live', $columnMapping, $mergeMode);
             $this->migrateVersionsData($sourceTable . '_Versions', $targetTable . '_Versions', $columnMapping);
         }
 
@@ -165,18 +245,26 @@ class TableMergeHandler
     /**
      * Migrate data from source to target table
      *
-     * Inserts records from source that don't exist in target (by ID).
-     * If that inserts nothing and there is more than one column pair, copies the source values
-     * onto the same-ID target rows, overwriting them (see updateExistingRecords()).
+     * Merges source rows whose ID already exists in the target according to $mergeMode (see
+     * updateExistingRecords()), then inserts the source rows that don't exist in target (by ID).
+     * Both happen on every merge, whether or not rows are inserted.
+     * (was, 0.3: "Inserts records from source that don't exist in target (by ID). If that inserts
+     * nothing and there is more than one column pair, copies the source values onto the same-ID
+     * target rows, overwriting them" - so on a partial overlap the existing rows were not merged)
      * (was: "Also updates existing target records where columns are empty/null." - it never
      * checked for empty values.)
      *
      * @param string $source Source table name
      * @param string $target Target table name
      * @param array<string, string> $columnMapping Source column => target column mapping
+     * @param string $mergeMode One of MERGE_MODES, for the same-ID rows
      */
-    protected function migrateTableData(string $source, string $target, array $columnMapping): void
-    {
+    protected function migrateTableData(
+        string $source,
+        string $target,
+        array $columnMapping,
+        string $mergeMode = self::MERGE_MODE_FILL_EMPTY
+    ): void {
         $schema = $this->getSchema();
 
         if (!$schema->hasTable($source) || !$schema->hasTable($target)) {
@@ -207,11 +295,42 @@ class TableMergeHandler
         // Count the source rows whose ID already exists in the target. This must happen BEFORE the
         // insert: afterwards the freshly inserted rows would match the join too. Only used for the
         // partial-overlap warning below; it does not change what is written.
+        # (#3) Now used to decide whether there are same-ID rows to merge, and for the message.
         $existing = (int) DB::query(sprintf(
             "SELECT COUNT(*) FROM %s s INNER JOIN %s t ON s.ID = t.ID",
             $conn->escapeIdentifier($source),
             $conn->escapeIdentifier($target)
         ))->value();
+
+        # (#3) Merge the same-ID rows FIRST, so the update only ever sees rows that were already in
+        # the target; after the insert below, the new rows would match the join as well.
+        # In skip mode they are deliberately not merged, which is said rather than warned about:
+        # the operator asked for it, so nothing is lost by surprise.
+        if ($existing > 0 && $mergeMode === self::MERGE_MODE_SKIP) {
+            DB::alteration_message(
+                sprintf(
+                    'TableMerge: %s -> %s: %d source row(s) already exist in %s by ID, left untouched (merge_mode skip)',
+                    $source,
+                    $target,
+                    $existing,
+                    $target
+                ),
+                'notice'
+            );
+        } elseif ($existing > 0) {
+            $this->updateExistingRecords($source, $target, $columnPairs, $mergeMode);
+            DB::alteration_message(
+                sprintf(
+                    'TableMerge: %s -> %s: %d source row(s) already exist in %s by ID, merged with merge_mode %s',
+                    $source,
+                    $target,
+                    $existing,
+                    $target,
+                    $mergeMode
+                ),
+                'notice'
+            );
+        }
 
         // Insert records that don't exist in target
         $sql = sprintf(
@@ -228,9 +347,10 @@ class TableMergeHandler
 
         // Copy source values onto same-ID target rows (overwrites; only when nothing was inserted and more than one column pair)
         // was: Update existing records where target columns are empty/null
-        if ($inserted === 0 && count($columnPairs) > 1) {
-            $this->updateExistingRecords($source, $target, $columnPairs);
-        }
+        # (#3) Replaced by the merge_mode update above, which runs on every merge with same-ID rows.
+        // if ($inserted === 0 && count($columnPairs) > 1) {
+        //     $this->updateExistingRecords($source, $target, $columnPairs);
+        // }
 
         if ($inserted > 0) {
             DB::alteration_message("{$target}: inserted {$inserted} record(s)", 'notice');
@@ -240,19 +360,21 @@ class TableMergeHandler
         // source values of the rows that already existed in the target were dropped. Say so, loudly,
         // rather than letting the merge look complete. (Whether they should be merged is an open
         // design question for 1.0; the write behaviour is deliberately unchanged here.)
-        if ($inserted > 0 && $existing > 0) {
-            DB::alteration_message(
-                sprintf(
-                    'TableMerge: %s -> %s: %d source row(s) already exist in %s by ID and were NOT updated'
-                    . ' (existing rows are only updated when a merge inserts nothing)',
-                    $source,
-                    $target,
-                    $existing,
-                    $target
-                ),
-                'error'
-            );
-        }
+        # (#3) Settled: same-ID rows are now always merged (per merge_mode, above), so no rows are
+        # dropped any more and this warning would be false.
+        // if ($inserted > 0 && $existing > 0) {
+        //     DB::alteration_message(
+        //         sprintf(
+        //             'TableMerge: %s -> %s: %d source row(s) already exist in %s by ID and were NOT updated'
+        //             . ' (existing rows are only updated when a merge inserts nothing)',
+        //             $source,
+        //             $target,
+        //             $existing,
+        //             $target
+        //         ),
+        //         'error'
+        //     );
+        // }
     }
 
     /**
@@ -387,18 +509,37 @@ class TableMergeHandler
     }
 
     /**
-     * Overwrite existing records in target with the source values
+     * Merge source values into the target rows that have the same ID, per $mergeMode
+     * (was: "Overwrite existing records in target with the source values")
      * (was: "Update existing records in target where values are empty" - there is no empty check)
      *
      * Called when source records already exist in target by ID.
-     * Copies column values from source to target.
+     * - overwrite: copies every paired column value from source to target, NULLs included.
+     * - fill_empty: copies a source value only into a target column that is NULL or an empty
+     *   string, or into a has_one ID column that is 0 (see isHasOneIdColumn()). In every other
+     *   column 0, '0' and a zero date are values, not empty, so they are kept.
+     *   (was: "string. 0, '0' and a zero date are values, not empty, so they are kept.")
+     * - skip: changes nothing (migrateTableData() does not call this in skip mode; the check
+     *   covers a subclass that does).
+     * Only the paired columns (mapped and same-named) are touched; target-only columns are not.
      *
      * @param string $source Source table name
      * @param string $target Target table name
      * @param array<string, string> $columnPairs Column pairs (sourceCol => targetCol)
+     * @param string $mergeMode One of MERGE_MODES. Defaults to overwrite, which is what this method
+     *                          did before merge_mode existed, for a subclass still calling it
+     *                          with three arguments.
      */
-    protected function updateExistingRecords(string $source, string $target, array $columnPairs): void
-    {
+    protected function updateExistingRecords(
+        string $source,
+        string $target,
+        array $columnPairs,
+        string $mergeMode = self::MERGE_MODE_OVERWRITE
+    ): void {
+        if ($mergeMode === self::MERGE_MODE_SKIP) {
+            return;
+        }
+
         $conn = $this->getConn();
         $updates = [];
 
@@ -406,10 +547,32 @@ class TableMergeHandler
             if ($sourceCol === 'ID') {
                 continue;
             }
+            $targetSql = $conn->escapeIdentifier($targetCol);
+            $sourceSql = $conn->escapeIdentifier($sourceCol);
+
+            if ($mergeMode === self::MERGE_MODE_FILL_EMPTY) {
+                # Keep the target value unless it is NULL or ''. The CAST matters: MySQL compares a
+                # number with '' by converting '' to 0, so a plain `t.X = ''` would treat an int 0
+                # (a Boolean false, a Sort of 0) as empty and overwrite it.
+                $emptySql = "t.%1\$s IS NULL OR CAST(t.%1\$s AS CHAR) = ''";
+                # A has_one ID of 0 is how Silverstripe stores "no relation", so there it is empty
+                # too. Compared as a string for the same reason as above: `t.X = 0` would also
+                # match any non-numeric string, should the column not be an int after all.
+                if ($this->isHasOneIdColumn($target, $targetCol)) {
+                    $emptySql .= " OR CAST(t.%1\$s AS CHAR) = '0'";
+                }
+                $updates[] = sprintf(
+                    "t.%1\$s = CASE WHEN {$emptySql} THEN s.%2\$s ELSE t.%1\$s END",
+                    $targetSql,
+                    $sourceSql
+                );
+                continue;
+            }
+
             $updates[] = sprintf(
                 "t.%s = s.%s",
-                $conn->escapeIdentifier($targetCol),
-                $conn->escapeIdentifier($sourceCol)
+                $targetSql,
+                $sourceSql
             );
         }
 
@@ -428,8 +591,62 @@ class TableMergeHandler
         $updated = DB::affected_rows();
 
         if ($updated > 0) {
-            DB::alteration_message("{$target}: updated {$updated} existing record(s)", 'notice');
+            # affected_rows() counts rows whose values actually changed
+            $what = $mergeMode === self::MERGE_MODE_FILL_EMPTY ? 'filled empty columns of' : 'updated';
+            DB::alteration_message("{$target}: {$what} {$updated} existing record(s)", 'notice');
         }
+    }
+
+    /**
+     * Whether $column of $table holds a has_one foreign key, for which 0 means "no relation"
+     *
+     * Decided from the DataObject schema when $table belongs to a DataObject class: the column is
+     * a has_one ID when it is "{Relation}ID" and the class has that has_one. That keeps an ordinary
+     * int field that merely ends in ID (an ExternalID, say) out of it. The target of a merge is
+     * usually the table of a live replacement class, so this is the normal path.
+     *
+     * When no class owns the table (a legacy or hand-made table, or one not in the manifest),
+     * there is no schema to ask, and any column whose name ends in "ID" counts: that is how
+     * Silverstripe names has_one columns. The table's own ID column never reaches this method.
+     *
+     * @param string $table Target table name; a _Live table is resolved to its base table's class
+     * @param string $column Target column name
+     */
+    protected function isHasOneIdColumn(string $table, string $column): bool
+    {
+        if (strlen($column) <= 2 || substr($column, -2) !== 'ID') {
+            return false;
+        }
+
+        $class = $this->getTableClass($table);
+        if ($class === null) {
+            # No schema to ask: fall back to the naming convention
+            return true;
+        }
+
+        return DataObject::getSchema()->hasOneComponent($class, substr($column, 0, -2)) !== null;
+    }
+
+    /**
+     * The DataObject class whose own table is $table (or, for "X_Live", whose table is X)
+     *
+     * Stricter than DataObjectSchema::tableClass(), which keeps stripping "_suffix" parts until
+     * something matches, so a raw "Page_Tags" would resolve to Page. Here the class must own the
+     * (base) table exactly.
+     *
+     * @param string $table Table name
+     * @return string|null The class, or null when no DataObject owns that table
+     */
+    protected function getTableClass(string $table): ?string
+    {
+        $schema = DataObject::getSchema();
+        $baseTable = preg_replace('/_Live$/', '', $table);
+        $class = $schema->tableClass($baseTable);
+        if ($class && $schema->tableName($class) === $baseTable) {
+            return $class;
+        }
+
+        return null;
     }
 
     /**
