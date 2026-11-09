@@ -63,6 +63,9 @@ class TableMergeHandlerTest extends SapphireTest
      * Pins what the code does today (0.3.0), not a settled design: when every source ID already
      * exists in the target (nothing inserted) and there is more than one column pair, the source
      * values OVERWRITE the same-ID target rows - they do not only fill empty columns.
+     *
+     * (#3) Settled 2026-11-09: overwriting is now opt-in with merge_mode: overwrite (the default is
+     * fill_empty), so this test sets it. The full-overlap overwrite it pins is unchanged.
      */
     public function testSameIdTargetRowsAreOverwrittenWhenNothingIsInserted(): void
     {
@@ -71,7 +74,10 @@ class TableMergeHandlerTest extends SapphireTest
         DB::query('INSERT INTO "DbmBanner" VALUES (1, \'src1\', \'e1\')');
         DB::query('INSERT INTO "DbmHero" VALUES (1, \'dst1\', \'old\')');
 
-        $merged = TableMergeHandler::create()->runTableMerges(['DbmBanner' => ['target' => 'DbmHero']]);
+        // $merged = TableMergeHandler::create()->runTableMerges(['DbmBanner' => ['target' => 'DbmHero']]);
+        $merged = TableMergeHandler::create()->runTableMerges([
+            'DbmBanner' => ['target' => 'DbmHero', 'merge_mode' => TableMergeHandler::MERGE_MODE_OVERWRITE],
+        ]);
 
         $this->assertSame(1, $merged);
         $this->assertSame(1, $this->rowCount('DbmHero'));
@@ -83,8 +89,14 @@ class TableMergeHandlerTest extends SapphireTest
      * Partial overlap: some source rows are new (inserted), some already exist in the target by ID.
      * The existing rows are NOT updated (the same-ID update only runs when nothing is inserted);
      * the merge must warn about the skipped rows instead of looking complete.
+     *
+     * (#3) Settled 2026-11-09: the existing rows are now merged per merge_mode on a partial overlap
+     * too, so nothing is skipped and the "were NOT updated" warning is gone. Here, in the default
+     * fill_empty mode, the existing row has no empty columns, so it is left as it was - the data
+     * assertions are the same as before; only the message changed.
+     * (was: testPartialOverlapWarnsAboutSkippedRowsAndLeavesThemUnchanged)
      */
-    public function testPartialOverlapWarnsAboutSkippedRowsAndLeavesThemUnchanged(): void
+    public function testPartialOverlapMergesExistingRowsAndNoLongerWarns(): void
     {
         $this->createRawTable('DbmBanner', '"ID" int, "Title" varchar(50), "Extra" varchar(50)');
         $this->createRawTable('DbmHero', '"ID" int, "Title" varchar(50), "Extra" varchar(50)');
@@ -105,8 +117,14 @@ class TableMergeHandlerTest extends SapphireTest
         $this->assertSame(['dst1', 'src2', 'src3'], $this->column('DbmHero', 'Title'));
         $this->assertSame(['old', 'e2', 'e3'], $this->column('DbmHero', 'Extra'));
         // The warning is an error-type message naming both tables and the skipped count
+        // $this->assertStringContainsString(
+        //     '! TableMerge: DbmBanner -> DbmHero: 1 source row(s) already exist in DbmHero by ID and were NOT updated',
+        //     $output
+        // );
+        # (#3) No rows are skipped any more: a notice names the same-ID rows and the mode instead
+        $this->assertStringNotContainsString('were NOT updated', $output);
         $this->assertStringContainsString(
-            '! TableMerge: DbmBanner -> DbmHero: 1 source row(s) already exist in DbmHero by ID and were NOT updated',
+            'TableMerge: DbmBanner -> DbmHero: 1 source row(s) already exist in DbmHero by ID, merged with merge_mode fill_empty',
             $output
         );
     }
@@ -135,6 +153,8 @@ class TableMergeHandlerTest extends SapphireTest
      * same-ID update DOES run. The partial-overlap warning must not fire here, or an operator is
      * told rows were dropped when they were in fact copied. Pins the `$inserted > 0` half of the
      * warning condition (the partial-overlap test above only pins the `$existing > 0` half).
+     *
+     * (#3) The overwrite is opt-in since 2026-11-09 (merge_mode: overwrite), so this test sets it.
      */
     public function testNoOverlapWarningWhenFullOverlapOverwritesTarget(): void
     {
@@ -147,7 +167,10 @@ class TableMergeHandlerTest extends SapphireTest
         DB::quiet(false);
         ob_start();
         try {
-            TableMergeHandler::create()->runTableMerges(['DbmBanner' => ['target' => 'DbmHero']]);
+            // TableMergeHandler::create()->runTableMerges(['DbmBanner' => ['target' => 'DbmHero']]);
+            TableMergeHandler::create()->runTableMerges([
+                'DbmBanner' => ['target' => 'DbmHero', 'merge_mode' => TableMergeHandler::MERGE_MODE_OVERWRITE],
+            ]);
         } finally {
             $output = ob_get_clean();
             DB::quiet(true);
