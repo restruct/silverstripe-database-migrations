@@ -5,6 +5,7 @@ namespace Restruct\SilverStripe\Migrations\Tests;
 use InvalidArgumentException;
 use Restruct\SilverStripe\Migrations\TableMergeHandler;
 use Restruct\SilverStripe\Migrations\Tests\Stub\MigratedThing;
+use Restruct\SilverStripe\Migrations\Tests\Stub\MergeTarget;
 use SilverStripe\Dev\SapphireTest;
 use SilverStripe\ORM\DB;
 
@@ -22,6 +23,8 @@ class TableMergeHandlerTest extends SapphireTest
     // be part of this class's temp schema too.
     protected static $extra_dataobjects = [
         MigratedThing::class,
+        # The has_one tests merge into this class's table, so its schema can be asked
+        MergeTarget::class,
     ];
 
     protected function setUp(): void
@@ -398,5 +401,41 @@ class TableMergeHandlerTest extends SapphireTest
         );
 
         TableMergeHandler::create()->runTableMerges(['DbmBanner' => ['target' => 'DbmHero']], 'fill-empty');
+    }
+
+    /**
+     * fill_empty: a has_one ID of 0 means "no relation", so it is empty and takes the source
+     * value. The target table here belongs to no DataObject, so the "...ID" name decides. A 0 in
+     * a column that does not end in ID is still a value and is kept.
+     */
+    public function testFillEmptyFillsZeroHasOneIdColumnsByNameWithoutAClass(): void
+    {
+        $this->createRawTable('DbmBanner', '"ID" int, "ImageID" int, "Num" int');
+        $this->createRawTable('DbmHero', '"ID" int, "ImageID" int, "Num" int');
+        DB::query('INSERT INTO "DbmBanner" VALUES (1, 11, 5), (2, 12, 6)');
+        DB::query('INSERT INTO "DbmHero" VALUES (1, 0, 0), (2, 7, 0)');
+
+        TableMergeHandler::create()->runTableMerges(['DbmBanner' => ['target' => 'DbmHero']]);
+
+        $this->assertSame(['11', '7'], array_map('strval', $this->column('DbmHero', 'ImageID')), 'a 0 has_one ID was not filled, or a set one was overwritten');
+        $this->assertSame(['0', '0'], array_map('strval', $this->column('DbmHero', 'Num')), 'a 0 in a non-ID column was treated as empty');
+    }
+
+    /**
+     * fill_empty on a target table that a DataObject owns: the schema decides which "...ID"
+     * columns are has_one foreign keys. ImageID (has_one Image) at 0 is filled; ExternalID (a
+     * plain Int that only looks like one) at 0 is kept.
+     */
+    public function testFillEmptyAsksTheSchemaWhichIdColumnsAreHasOnes(): void
+    {
+        $this->createRawTable('DbmBanner', '"ID" int, "Title" varchar(50), "ImageID" int, "ExternalID" int');
+        DB::query('INSERT INTO "DbmBanner" VALUES (1, \'src1\', 11, 99)');
+        DB::query('INSERT INTO "MergeTestTarget" ("ID", "Title", "ImageID", "ExternalID") VALUES (1, \'dst1\', 0, 0)');
+
+        TableMergeHandler::create()->runTableMerges(['DbmBanner' => ['target' => 'MergeTestTarget']]);
+
+        $this->assertSame(['dst1'], $this->column('MergeTestTarget', 'Title'));
+        $this->assertSame(['11'], array_map('strval', $this->column('MergeTestTarget', 'ImageID')), 'a 0 has_one ID was not filled');
+        $this->assertSame(['0'], array_map('strval', $this->column('MergeTestTarget', 'ExternalID')), 'a 0 in an Int that is not a has_one was treated as empty');
     }
 }

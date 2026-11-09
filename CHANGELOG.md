@@ -1,6 +1,6 @@
 # Changelog
 
-## (unreleased)
+## 0.4.0 (unreleased)
 
 ### Changed (behaviour)
 
@@ -8,7 +8,10 @@
   (#3). A `table_merges` source row whose ID already exists in the target is now merged per the
   new `merge_mode`:
   - `fill_empty` (the default): only target columns that are `NULL` or an empty string take the
-    source value. `0`, `'0'` and zero dates are values and are kept.
+    source value, and `has_one` ID columns that are `0` (an unset relation). Which columns are
+    `has_one` IDs comes from the DataObject schema when a class owns the target table, otherwise
+    from the name (ending in `ID`). In other columns `0`, `'0'` and zero dates are values and are
+    kept.
   - `overwrite`: the target columns are replaced by the source values, `NULL` included.
 
   Set it per merge (`merge_mode` in the `table_merges` entry) or for all merges

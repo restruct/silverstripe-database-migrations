@@ -252,11 +252,15 @@ Target columns the source does not have are never touched.
 
 | `merge_mode` | Same-ID target row |
 | ------------ | ------------------ |
-| `fill_empty` (default) | a column that is `NULL` or an empty string takes the source value; every other value is kept, so the merge never overwrites data |
+| `fill_empty` (default) | a column that is `NULL` or an empty string takes the source value, and so does a `has_one` ID column that is `0`; every other value is kept, so the merge never overwrites data |
 | `overwrite` | every paired column takes the source value, `NULL` included |
 
-In `fill_empty`, `0`, `'0'` and a zero date count as values, not as empty, so an unset `has_one`
-(`0`) is not filled from the source. Use `overwrite` when the source should win.
+In `fill_empty`, a `has_one` ID column of `0` counts as empty, as `0` is how Silverstripe stores
+"no relation", so an unset `has_one` is filled from the source. Which columns are `has_one` IDs is
+read from the DataObject schema when the target table belongs to a DataObject class (so an `Int`
+field that merely ends in `ID` is not one); when no class owns the target table, every column
+whose name ends in `ID` counts. In all other columns `0`, `'0'` and a zero date are values, not
+empty, and are kept. Use `overwrite` when the source should win.
 
 Set the mode for one merge with `merge_mode` in its `table_merges` entry, or for every merge
 without its own with `table_merge_mode`. Any other value stops `dev/build` with an

@@ -5,6 +5,7 @@ namespace Restruct\SilverStripe\Migrations;
 use InvalidArgumentException;
 use SilverStripe\Core\Config\Configurable;
 use SilverStripe\Core\Injector\Injectable;
+use SilverStripe\ORM\DataObject;
 use SilverStripe\ORM\DB;
 
 /**
@@ -32,7 +33,8 @@ use SilverStripe\ORM\DB;
  *
  * merge_mode decides what happens to a source row whose ID already exists in the target:
  * - fill_empty (default): only target columns that are NULL or an empty string get the source
- *   value; every other target value is kept. A merge in this mode never overwrites data.
+ *   value, and a has_one ID column that is 0 (an unset relation); every other target value is
+ *   kept. A merge in this mode never overwrites data.
  * - overwrite: the target row's columns are replaced by the source values.
  * Source rows whose ID is not in the target are inserted in both modes. The default for merges
  * without their own merge_mode is DatabaseMigrationExtension.table_merge_mode.
@@ -48,7 +50,8 @@ class TableMergeHandler
     use Configurable;
 
     /**
-     * Same-ID target rows: only NULL or empty-string columns take the source value
+     * Same-ID target rows: only NULL or empty-string columns take the source value, and has_one
+     * ID columns that are 0 (an unset relation)
      */
     public const MERGE_MODE_FILL_EMPTY = 'fill_empty';
 
@@ -492,7 +495,9 @@ class TableMergeHandler
      * Called when source records already exist in target by ID.
      * - overwrite: copies every paired column value from source to target, NULLs included.
      * - fill_empty: copies a source value only into a target column that is NULL or an empty
-     *   string. 0, '0' and a zero date are values, not empty, so they are kept.
+     *   string, or into a has_one ID column that is 0 (see isHasOneIdColumn()). In every other
+     *   column 0, '0' and a zero date are values, not empty, so they are kept.
+     *   (was: "string. 0, '0' and a zero date are values, not empty, so they are kept.")
      * Only the paired columns (mapped and same-named) are touched; target-only columns are not.
      *
      * @param string $source Source table name
@@ -522,8 +527,15 @@ class TableMergeHandler
                 # Keep the target value unless it is NULL or ''. The CAST matters: MySQL compares a
                 # number with '' by converting '' to 0, so a plain `t.X = ''` would treat an int 0
                 # (a Boolean false, a Sort of 0) as empty and overwrite it.
+                $emptySql = "t.%1\$s IS NULL OR CAST(t.%1\$s AS CHAR) = ''";
+                # A has_one ID of 0 is how Silverstripe stores "no relation", so there it is empty
+                # too. Compared as a string for the same reason as above: `t.X = 0` would also
+                # match any non-numeric string, should the column not be an int after all.
+                if ($this->isHasOneIdColumn($target, $targetCol)) {
+                    $emptySql .= " OR CAST(t.%1\$s AS CHAR) = '0'";
+                }
                 $updates[] = sprintf(
-                    "t.%1\$s = CASE WHEN t.%1\$s IS NULL OR CAST(t.%1\$s AS CHAR) = '' THEN s.%2\$s ELSE t.%1\$s END",
+                    "t.%1\$s = CASE WHEN {$emptySql} THEN s.%2\$s ELSE t.%1\$s END",
                     $targetSql,
                     $sourceSql
                 );
@@ -556,6 +568,58 @@ class TableMergeHandler
             $what = $mergeMode === self::MERGE_MODE_FILL_EMPTY ? 'filled empty columns of' : 'updated';
             DB::alteration_message("{$target}: {$what} {$updated} existing record(s)", 'notice');
         }
+    }
+
+    /**
+     * Whether $column of $table holds a has_one foreign key, for which 0 means "no relation"
+     *
+     * Decided from the DataObject schema when $table belongs to a DataObject class: the column is
+     * a has_one ID when it is "{Relation}ID" and the class has that has_one. That keeps an ordinary
+     * int field that merely ends in ID (an ExternalID, say) out of it. The target of a merge is
+     * usually the table of a live replacement class, so this is the normal path.
+     *
+     * When no class owns the table (a legacy or hand-made table, or one not in the manifest),
+     * there is no schema to ask, and any column whose name ends in "ID" counts: that is how
+     * Silverstripe names has_one columns. The table's own ID column never reaches this method.
+     *
+     * @param string $table Target table name; a _Live table is resolved to its base table's class
+     * @param string $column Target column name
+     */
+    protected function isHasOneIdColumn(string $table, string $column): bool
+    {
+        if (strlen($column) <= 2 || substr($column, -2) !== 'ID') {
+            return false;
+        }
+
+        $class = $this->getTableClass($table);
+        if ($class === null) {
+            # No schema to ask: fall back to the naming convention
+            return true;
+        }
+
+        return DataObject::getSchema()->hasOneComponent($class, substr($column, 0, -2)) !== null;
+    }
+
+    /**
+     * The DataObject class whose own table is $table (or, for "X_Live", whose table is X)
+     *
+     * Stricter than DataObjectSchema::tableClass(), which keeps stripping "_suffix" parts until
+     * something matches, so a raw "Page_Tags" would resolve to Page. Here the class must own the
+     * (base) table exactly.
+     *
+     * @param string $table Table name
+     * @return string|null The class, or null when no DataObject owns that table
+     */
+    protected function getTableClass(string $table): ?string
+    {
+        $schema = DataObject::getSchema();
+        $baseTable = preg_replace('/_Live$/', '', $table);
+        $class = $schema->tableClass($baseTable);
+        if ($class && $schema->tableName($class) === $baseTable) {
+            return $class;
+        }
+
+        return null;
     }
 
     /**
