@@ -445,4 +445,56 @@ class TableMergeHandlerTest extends SapphireTest
         $this->assertSame(['11'], array_map('strval', $this->column('MergeTestTarget', 'ImageID')), 'a 0 has_one ID was not filled');
         $this->assertSame(['0'], array_map('strval', $this->column('MergeTestTarget', 'ExternalID')), 'a 0 in an Int that is not a has_one was treated as empty');
     }
+
+    /**
+     * skip: the same-ID target row is left exactly as it was, even its NULL, '' and 0 has_one ID
+     * columns, while the missing rows are inserted. The build says so in a notice, not with the
+     * 0.3 "were NOT updated" warning.
+     */
+    public function testSkipLeavesSameIdRowsUntouchedAndInsertsTheRest(): void
+    {
+        $this->createRawTable('DbmBanner', '"ID" int, "Title" varchar(50), "Extra" varchar(50), "ImageID" int');
+        $this->createRawTable('DbmHero', '"ID" int, "Title" varchar(50), "Extra" varchar(50), "ImageID" int');
+        DB::query('INSERT INTO "DbmBanner" VALUES (1, \'src1\', \'e1\', 11), (2, \'src2\', \'e2\', 12)');
+        DB::query('INSERT INTO "DbmHero" VALUES (1, \'\', NULL, 0)');
+
+        DB::quiet(false);
+        ob_start();
+        try {
+            TableMergeHandler::create()->runTableMerges([
+                'DbmBanner' => ['target' => 'DbmHero', 'merge_mode' => TableMergeHandler::MERGE_MODE_SKIP],
+            ]);
+        } finally {
+            $output = ob_get_clean();
+            DB::quiet(true);
+        }
+
+        $this->assertSame(['', 'src2'], $this->column('DbmHero', 'Title'), 'the same-ID row was merged');
+        $this->assertSame([null, 'e2'], $this->column('DbmHero', 'Extra'), 'the same-ID row was merged');
+        $this->assertSame(['0', '12'], array_map('strval', $this->column('DbmHero', 'ImageID')), 'the same-ID row was merged');
+        $this->assertStringContainsString(
+            'TableMerge: DbmBanner -> DbmHero: 1 source row(s) already exist in DbmHero by ID, left untouched (merge_mode skip)',
+            $output
+        );
+        $this->assertStringNotContainsString('were NOT updated', $output);
+    }
+
+    /**
+     * skip is accepted as the default mode too (DatabaseMigrationExtension.table_merge_mode)
+     */
+    public function testSkipAsDefaultMergeMode(): void
+    {
+        $this->createRawTable('DbmBanner', '"ID" int, "Title" varchar(50)');
+        $this->createRawTable('DbmHero', '"ID" int, "Title" varchar(50)');
+        DB::query('INSERT INTO "DbmBanner" VALUES (1, \'src1\')');
+        DB::query('INSERT INTO "DbmHero" VALUES (1, NULL)');
+
+        $merged = TableMergeHandler::create()->runTableMerges(
+            ['DbmBanner' => ['target' => 'DbmHero']],
+            TableMergeHandler::MERGE_MODE_SKIP
+        );
+
+        $this->assertSame(1, $merged);
+        $this->assertSame([null], $this->column('DbmHero', 'Title'), 'the same-ID row was merged');
+    }
 }

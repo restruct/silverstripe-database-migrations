@@ -13,6 +13,8 @@
     from the name (ending in `ID`). In other columns `0`, `'0'` and zero dates are values and are
     kept.
   - `overwrite`: the target columns are replaced by the source values, `NULL` included.
+  - `skip`: the target row is left untouched; only the missing rows are inserted. This is what
+    0.3 did on a partial overlap, without the "were NOT updated" message.
 
   Set it per merge (`merge_mode` in the `table_merges` entry) or for all merges
   (`table_merge_mode` on `DatabaseMigrationExtension`). Any other value stops `dev/build` with an
@@ -20,7 +22,8 @@
 
   Before, same-ID rows were overwritten, but only when the merge inserted no rows at all and there
   was more than one column pair; on a partial overlap they were skipped with a
-  "were NOT updated" error message. That message is gone, as the rows are no longer skipped.
+  "were NOT updated" error message. That message is gone: rows are only left alone when
+  `merge_mode: skip` asks for it, and the build then says so in a notice.
 
 #### If you upgrade
 
@@ -30,8 +33,8 @@ moved its source table aside and does nothing again. For a pending merge:
 - If you relied on the target rows being overwritten when every source ID already exists in the
   target, add `merge_mode: overwrite` to that merge (or set `table_merge_mode: overwrite`).
 - On a partial overlap the existing rows used to be left alone; they are now filled
-  (`fill_empty`) or overwritten (`overwrite`). No mode leaves them untouched: if they must stay
-  as they are, remove the overlapping rows from the source table before the build.
+  (`fill_empty`) or overwritten (`overwrite`). If they must stay as they are, set
+  `merge_mode: skip`.
 
 ## 0.3.1 (2026-10-08)
 

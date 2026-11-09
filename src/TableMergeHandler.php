@@ -28,7 +28,7 @@ use SilverStripe\ORM\DB;
  *         column: Style                     # Column name
  *         value: hero-banner                # Value to set
  *       versioned: true                     # Auto-handle _Live and _Versions tables
- *       merge_mode: fill_empty              # Same-ID rows: fill_empty (default) or overwrite (optional)
+ *       merge_mode: fill_empty              # Same-ID rows: fill_empty (default), overwrite or skip (optional)
  * ```
  *
  * merge_mode decides what happens to a source row whose ID already exists in the target:
@@ -36,7 +36,9 @@ use SilverStripe\ORM\DB;
  *   value, and a has_one ID column that is 0 (an unset relation); every other target value is
  *   kept. A merge in this mode never overwrites data.
  * - overwrite: the target row's columns are replaced by the source values.
- * Source rows whose ID is not in the target are inserted in both modes. The default for merges
+ * - skip: the target row is left untouched; the source row is not merged.
+ * Source rows whose ID is not in the target are inserted in every mode.
+ * (was: "Source rows whose ID is not in the target are inserted in both modes.") The default for merges
  * without their own merge_mode is DatabaseMigrationExtension.table_merge_mode.
  *
  * Security note:
@@ -61,11 +63,17 @@ class TableMergeHandler
     public const MERGE_MODE_OVERWRITE = 'overwrite';
 
     /**
+     * Same-ID target rows: left untouched, only the missing rows are inserted
+     */
+    public const MERGE_MODE_SKIP = 'skip';
+
+    /**
      * Every accepted merge_mode value
      */
     public const MERGE_MODES = [
         self::MERGE_MODE_FILL_EMPTY,
         self::MERGE_MODE_OVERWRITE,
+        self::MERGE_MODE_SKIP,
     ];
 
     /**
@@ -296,7 +304,20 @@ class TableMergeHandler
 
         # (#3) Merge the same-ID rows FIRST, so the update only ever sees rows that were already in
         # the target; after the insert below, the new rows would match the join as well.
-        if ($existing > 0) {
+        # In skip mode they are deliberately not merged, which is said rather than warned about:
+        # the operator asked for it, so nothing is lost by surprise.
+        if ($existing > 0 && $mergeMode === self::MERGE_MODE_SKIP) {
+            DB::alteration_message(
+                sprintf(
+                    'TableMerge: %s -> %s: %d source row(s) already exist in %s by ID, left untouched (merge_mode skip)',
+                    $source,
+                    $target,
+                    $existing,
+                    $target
+                ),
+                'notice'
+            );
+        } elseif ($existing > 0) {
             $this->updateExistingRecords($source, $target, $columnPairs, $mergeMode);
             DB::alteration_message(
                 sprintf(
@@ -498,6 +519,8 @@ class TableMergeHandler
      *   string, or into a has_one ID column that is 0 (see isHasOneIdColumn()). In every other
      *   column 0, '0' and a zero date are values, not empty, so they are kept.
      *   (was: "string. 0, '0' and a zero date are values, not empty, so they are kept.")
+     * - skip: changes nothing (migrateTableData() does not call this in skip mode; the check
+     *   covers a subclass that does).
      * Only the paired columns (mapped and same-named) are touched; target-only columns are not.
      *
      * @param string $source Source table name
@@ -513,6 +536,10 @@ class TableMergeHandler
         array $columnPairs,
         string $mergeMode = self::MERGE_MODE_OVERWRITE
     ): void {
+        if ($mergeMode === self::MERGE_MODE_SKIP) {
+            return;
+        }
+
         $conn = $this->getConn();
         $updates = [];
 
