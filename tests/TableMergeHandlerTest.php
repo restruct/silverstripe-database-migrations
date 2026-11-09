@@ -337,6 +337,11 @@ class TableMergeHandlerTest extends SapphireTest
     /**
      * (#3) The merge_mode applies to the _Live table as well, and to a mapped column: the mapped
      * HeroImageID of 0 is a value and is kept in fill_empty mode, the empty Title is filled.
+     *
+     * (#3) Changed on purpose 2026-11-09 (mic): a has_one ID of 0 is empty in fill_empty, and
+     * HeroImageID on a table no class owns counts as one by its name, so the 0 is now filled from
+     * the source (11) on both tables. The test still pins what it was written for: the mode
+     * reaches _Live and the mapped column.
      */
     public function testFillEmptyAppliesToLiveTableAndMappedColumns(): void
     {
@@ -356,9 +361,11 @@ class TableMergeHandlerTest extends SapphireTest
         ]);
 
         $this->assertSame(['b1', 'b2'], $this->column('DbmHero', 'Title'));
-        $this->assertSame(['0', '12'], array_map('strval', $this->column('DbmHero', 'HeroImageID')));
+        // $this->assertSame(['0', '12'], array_map('strval', $this->column('DbmHero', 'HeroImageID')));
+        $this->assertSame(['11', '12'], array_map('strval', $this->column('DbmHero', 'HeroImageID')));
         $this->assertSame(['b1 live'], $this->column('DbmHero_Live', 'Title'));
-        $this->assertSame(['0'], array_map('strval', $this->column('DbmHero_Live', 'HeroImageID')));
+        // $this->assertSame(['0'], array_map('strval', $this->column('DbmHero_Live', 'HeroImageID')));
+        $this->assertSame(['11'], array_map('strval', $this->column('DbmHero_Live', 'HeroImageID')));
     }
 
     /**
